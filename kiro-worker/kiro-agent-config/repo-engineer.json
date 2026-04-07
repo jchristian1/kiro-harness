@@ -1,0 +1,13 @@
+{
+  "name": "repo-engineer",
+  "description": "General-purpose engineering agent for analysis, implementation, and validation of repo tasks",
+  "model": "claude-sonnet-4-5",
+  "tools": ["read", "write", "shell", "search_files", "get_diagnostics"],
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": ["npm *", "yarn *", "pnpm *", "python *", "pytest *", "cargo *", "go *", "git status", "git diff"],
+      "deniedCommands": ["git push *", "git commit *", "rm -rf *"]
+    }
+  },
+  "resources": ["file://.kiro/steering/**/*.md"]
+}

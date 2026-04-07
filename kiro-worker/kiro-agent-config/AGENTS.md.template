@@ -1,0 +1,17 @@
+# Project: [project name]
+
+## What this is
+[1-2 sentence project description]
+
+## Tech stack
+[Language, framework, key dependencies]
+
+## Key constraints
+- [Constraint 1: e.g., "Do not modify the public API surface without approval"]
+- [Constraint 2: e.g., "All DB changes must include a migration"]
+- [Constraint 3: e.g., "Tests must pass before any implementation is considered done"]
+
+## What not to do
+- Do not push to main directly
+- Do not delete files without explicit instruction
+- Do not install new dependencies without listing them in the implementation output

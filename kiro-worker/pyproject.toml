@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiro-worker"
+version = "1.0.0"
+description = "kiro-worker: Backend system for managing Kiro CLI task execution"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn[standard]",
+    "sqlalchemy>=2.0",
+    "alembic",
+    "pydantic>=2.0",
+    "pydantic-settings",
+    "python-ulid",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "anyio[trio]",
+    "httpx",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
