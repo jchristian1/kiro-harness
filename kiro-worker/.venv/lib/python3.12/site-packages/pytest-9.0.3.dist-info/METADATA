@@ -1,8 +1,8 @@
 Metadata-Version: 2.4
 Name: pytest
-Version: 9.0.2
+Version: 9.0.3
 Summary: pytest: simple powerful testing with Python
-Author: Holger Krekel, Bruno Oliveira, Ronny Pfannschmidt, Floris Bruynooghe, Brianna Laugher, Florian Bruhin, Others (See AUTHORS)
+Author: Holger Krekel, Bruno Oliveira, Ronny Pfannschmidt, Floris Bruynooghe, Brianna Laugher, Freya Bruhin, Others (See AUTHORS)
 License-Expression: MIT
 Project-URL: Changelog, https://docs.pytest.org/en/stable/changelog.html
 Project-URL: Contact, https://docs.pytest.org/en/stable/contact.html

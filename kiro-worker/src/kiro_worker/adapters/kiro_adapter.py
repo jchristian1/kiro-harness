@@ -1,27 +1,18 @@
 """
 Kiro CLI adapter — documented interface only.
 
-Invocation model (kiro chat, documented in `kiro chat --help`):
+Invocation model (kiro-cli chat, documented in `kiro-cli chat --help`):
 
-    kiro chat --mode <agent> <prompt>
+    kiro-cli chat --agent <agent> --no-interactive <prompt>
 
-Run with cwd=workspace_path so Kiro loads the workspace context automatically:
-  - AGENTS.md at the workspace root is always included by Kiro (no flag needed)
-  - .kiro/steering/**/*.md is loaded if declared in the agent's resources config
-  - .kiro/agents/<agent>.json defines tool permissions, model, and resources
-
-The prompt is the sole mechanism for passing task-specific context (intent,
-description, prior analysis, approved plan, revision instructions). It is
-constructed by the worker and passed as a positional argument to `kiro chat`.
+Run with cwd=workspace_path so kiro-cli loads the workspace context automatically.
 
 Flags used:
-  --mode <agent>   Selects the custom agent (or built-in mode). Documented.
-
-Flags NOT used (undocumented, do not add):
-  --agent, --workspace, --skill, --context, --output-format
+  --agent <agent>    Selects the agent/context profile.
+  --no-interactive   Runs headlessly without waiting for user input.
 
 Output contract:
-  Kiro must respond with a JSON block as the last JSON object in stdout.
+  kiro-cli must respond with a JSON block in stdout.
   The worker extracts the first valid top-level JSON object from stdout,
   validates it against the schema for the run mode, and stores it as an artifact.
   If no valid JSON is found, the run is marked parse_failed.
@@ -134,24 +125,76 @@ _VALIDATORS = {
 
 def build_prompt(skill: str, context: dict) -> str:
     """
-    Build the prompt text passed to `kiro chat`.
+    Build the prompt text passed to `kiro-cli chat`.
 
-    The prompt carries all task-specific context that Kiro needs for this
-    invocation. Persistent context (engineering standards, project overview)
-    is supplied by AGENTS.md and .kiro/steering/ in the workspace — not here.
-
-    The prompt instructs Kiro to respond with a single JSON object conforming
-    to the output contract for the given skill.
+    The prompt carries all task-specific context and the exact output schema
+    that kiro-cli must conform to.
     """
     mode = _SKILL_TO_MODE.get(skill, skill)
     context_json = json.dumps(context, indent=2)
 
+    if mode == "analyze":
+        schema_instruction = (
+            "You MUST respond with ONLY a single JSON object — no prose, no markdown, no explanation before or after it.\n\n"
+            "The JSON object MUST have exactly these fields:\n"
+            "{\n"
+            '  "schema_version": "1",\n'
+            '  "mode": "analyze",\n'
+            '  "headline": "<one sentence summary, max 200 chars>",\n'
+            '  "findings": ["<finding 1>", "<finding 2>"],\n'
+            '  "affected_areas": ["<file or module path>"],\n'
+            '  "tradeoffs": [],\n'
+            '  "risks": [],\n'
+            '  "implementation_steps": ["<step 1>", "<step 2>"],\n'
+            '  "validation_commands": [],\n'
+            '  "questions": [],\n'
+            '  "recommended_next_step": "approve_and_implement"\n'
+            "}\n\n"
+            'recommended_next_step must be one of: "approve_and_implement", "request_clarification", "no_action_needed"\n'
+            "findings and implementation_steps must be non-empty arrays.\n"
+        )
+    elif mode == "implement":
+        schema_instruction = (
+            "You MUST respond with ONLY a single JSON object — no prose, no markdown, no explanation before or after it.\n\n"
+            "The JSON object MUST have exactly these fields:\n"
+            "{\n"
+            '  "schema_version": "1",\n'
+            '  "mode": "implement",\n'
+            '  "headline": "<one sentence summary>",\n'
+            '  "files_changed": [{"path": "<relative path>", "action": "created|modified|deleted", "description": "<what changed>"}],\n'
+            '  "changes_summary": "<prose summary>",\n'
+            '  "validation_run": null,\n'
+            '  "known_issues": [],\n'
+            '  "follow_ups": [],\n'
+            '  "recommended_next_step": "run_validation"\n'
+            "}\n\n"
+            'recommended_next_step must be one of: "run_validation", "request_review", "needs_follow_up"\n'
+            "files_changed must be a non-empty array.\n"
+        )
+    elif mode == "validate":
+        schema_instruction = (
+            "You MUST respond with ONLY a single JSON object — no prose, no markdown, no explanation before or after it.\n\n"
+            "The JSON object MUST have exactly these fields:\n"
+            "{\n"
+            '  "schema_version": "1",\n'
+            '  "mode": "validate",\n'
+            '  "commands_run": ["<command>"],\n'
+            '  "results": [{"command": "<cmd>", "exit_code": 0, "passed": true, "output_excerpt": "<last 500 chars>"}],\n'
+            '  "passed": true,\n'
+            '  "issues_found": [],\n'
+            '  "recommended_next_step": "mark_done"\n'
+            "}\n\n"
+            'recommended_next_step must be one of: "mark_done", "request_revision", "retry_validation"\n'
+            "commands_run and results must be non-empty arrays.\n"
+        )
+    else:
+        schema_instruction = (
+            f"Respond with a single JSON object with schema_version='1' and mode='{mode}'.\n"
+        )
+
     return (
-        f"You are running the {skill} workflow.\n\n"
         f"Task context:\n{context_json}\n\n"
-        f"Respond with a single JSON object conforming to the {mode} output schema "
-        f"(schema_version=\\\"1\\\", mode=\\\"{mode}\\\"). "
-        f"Output only the JSON object — no prose before or after it."
+        f"{schema_instruction}"
     )
 
 
@@ -200,26 +243,20 @@ async def invoke_kiro(
     timeout: int = 300,
 ) -> KiroInvocationResult:
     """
-    Invoke Kiro CLI using the documented `kiro chat` interface.
+    Invoke kiro-cli using the documented `kiro-cli chat` interface.
 
-    Command: kiro chat --mode <agent> <prompt>
-    CWD:     workspace_path  (Kiro loads AGENTS.md and steering from here)
+    Command: kiro-cli chat --no-interactive --trust-all-tools <prompt>
+    CWD:     workspace_path
 
-    The agent name is passed as --mode, which selects the custom agent defined
-    in <workspace>/.kiro/agents/<agent>.json. That agent config declares:
-      - tool permissions
-      - model selection
-      - resources (including "file://.kiro/steering/**/*.md" for steering)
-
-    AGENTS.md at the workspace root is always loaded by Kiro automatically.
-    Steering files are loaded only if declared in the agent's resources config.
-    Neither requires a CLI flag.
+    --no-interactive runs headlessly without waiting for user input.
+    --trust-all-tools auto-approves tool use (required with --no-interactive).
     """
     prompt = build_prompt(skill, context)
     cmd = [
         settings.KIRO_CLI_PATH,
         "chat",
-        "--mode", agent,
+        "--no-interactive",
+        "--trust-all-tools",
         prompt,
     ]
 

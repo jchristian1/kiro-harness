@@ -1,4 +1,4 @@
-#!/home/christian/Desktop/Kiro-hasrness/kiro-worker/.venv/bin/python3
+#!/home/christian/Desktop/kiro-harness/kiro-worker/.venv/bin/python3.12
 # -*- coding: utf-8 -*-
 import re
 import sys

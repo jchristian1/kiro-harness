@@ -4,7 +4,7 @@
 
 - Python 3.11+
 - git (for github_repo and local_repo workspace sources)
-- Kiro CLI installed and accessible (for production use)
+- `kiro-cli` installed and accessible (for production use): `curl -fsSL https://cli.kiro.dev/install | bash`
 
 ## Installation
 
@@ -35,7 +35,7 @@ Key settings:
 |---|---|---|
 | `DATABASE_URL` | `sqlite:///./kiro_worker.db` | SQLite DB path (or Postgres URL for production) |
 | `WORKSPACE_SAFE_ROOT` | `/tmp/kiro-worker/workspaces` | All managed workspace paths must be under this root |
-| `KIRO_CLI_PATH` | `kiro` | Path to the Kiro CLI binary |
+| `KIRO_CLI_PATH` | `kiro-cli` | Path to the kiro-cli binary (install via `curl -fsSL https://cli.kiro.dev/install | bash`) |
 | `KIRO_DEFAULT_AGENT` | `repo-engineer` | Default Kiro custom agent name |
 | `KIRO_CLI_TIMEOUT` | `300` | Seconds before Kiro CLI subprocess is killed |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
@@ -84,23 +84,24 @@ pytest tests/test_state_machine.py -v
 
 ### Kiro CLI Invocation Model
 
-The adapter invokes Kiro using the documented `kiro chat` subcommand:
+The adapter invokes kiro-cli using the `kiro-cli chat` subcommand:
 
 ```
-kiro chat --mode <agent> <prompt>
+kiro-cli chat --agent <agent> --no-interactive <prompt>
 ```
 
-Run with `cwd=workspace_path`. This is the only documented non-interactive
-invocation interface (`kiro chat --help`).
+Run with `cwd=workspace_path`.
 
-- `--mode <agent>` selects the custom agent defined in `<workspace>/.kiro/agents/<agent>.json`
+- `--agent <agent>` selects the context profile/agent
+- `--no-interactive` runs headlessly without waiting for user input, required for subprocess invocation
 - The prompt carries all task-specific context (intent, description, prior analysis, etc.)
-- `AGENTS.md` at the workspace root is always loaded by Kiro automatically — no flag needed
-- `.kiro/steering/**/*.md` is loaded if declared in the agent's `resources` config — no flag needed
-- The adapter extracts the first JSON object from stdout (Kiro may emit prose around it)
+- The adapter extracts the first JSON object from stdout (kiro-cli may emit prose around it)
 
-Flags that are **not** used (undocumented): `--workspace`, `--skill`, `--context`,
-`--output-format`, `--agent`, `--no-interactive`.
+Note: `KIRO_CLI_PATH` in `.env` must point to the `kiro-cli` binary (not the Kiro IDE launcher at `/usr/bin/kiro`). Install kiro-cli with:
+
+```bash
+curl -fsSL https://cli.kiro.dev/install | bash
+```
 
 ### Synchronous Kiro Invocation
 

@@ -168,22 +168,23 @@ Every request Henry receives is classified into three dimensions before calling 
 
 ## Kiro Invocation Model
 
-The worker invokes Kiro CLI as a subprocess. The invocation passes:
+The worker invokes `kiro-cli` as a subprocess using the `chat` subcommand:
+
+```
+kiro-cli chat --agent <agent> --no-interactive <prompt>
+```
+
+Run with `cwd=workspace_path`.
 
 | Parameter | Source | Notes |
 |---|---|---|
-| `--agent` | worker config | Which custom agent to use (e.g., `repo-engineer`) |
-| `--workspace` | workspace record | Absolute path to the workspace root |
-| `--skill` | task operation | Which skill to execute (e.g., `analysis-workflow`) |
-| `--context` | task + run record | Structured JSON: task description, intent, prior analysis, approved plan |
-| `--output-format` | always `json` | Worker always expects structured JSON back |
-
-Kiro CLI automatically loads:
-- The custom agent config from `.kiro/agents/{agent-name}.json`
-- `AGENTS.md` from the workspace root (always included, no config required)
-- Steering files **only if** declared in the agent's `resources` (not automatic for custom agents)
+| `--agent` | worker config | Which agent/context profile to use (e.g., `repo-engineer`) |
+| `--no-interactive` | always set | Runs headlessly without waiting for user input — required for subprocess use |
+| `<prompt>` | task + run record | Constructed by the worker: skill name, task context (intent, description, prior analysis, approved plan), and output schema instructions |
 
 The worker captures stdout, attempts JSON parse, validates against the output contract schema, and stores the result. If parse fails, the run is marked `parse_failed` and the task transitions to `failed`.
+
+**Note:** `kiro-cli` (the terminal CLI at `~/.local/bin/kiro-cli`) is a separate binary from the Kiro IDE launcher (`/usr/bin/kiro`). Install with: `curl -fsSL https://cli.kiro.dev/install | bash`
 
 ### Custom Agent: `repo-engineer` (Phase 1)
 
@@ -261,10 +262,9 @@ sequenceDiagram
     H->>H: classify → intent=add_feature, source=local_repo, op=analyze_then_approve
     H->>W: POST /tasks {project_id, intent, source, operation}
     W->>WS: open/validate workspace
-    W->>K: invoke CLI --agent repo-engineer --skill analysis-workflow --context {...}
+    W->>K: invoke kiro-cli chat --agent repo-engineer --no-interactive <prompt>
     K->>CA: load agent config + tools + permissions
-    K->>K: auto-load AGENTS.md; load steering via agent resources
-    K->>K: execute analysis-workflow skill
+    K->>K: execute analysis workflow per prompt instructions
     CA-->>K: structured analysis JSON
     K-->>W: stdout: structured analysis JSON
     W->>W: parse + validate against output contract
@@ -273,14 +273,13 @@ sequenceDiagram
     H-->>U: "Here's what I found. Approve to proceed?"
     U->>H: "Yes, go ahead"
     H->>W: POST /tasks/{id}/approve
-    W->>K: invoke CLI --agent repo-engineer --skill implementation-workflow --context {approved_plan}
+    W->>K: invoke kiro-cli chat --agent repo-engineer --no-interactive <prompt with approved_plan>
     K->>CA: load agent config
-    K->>K: auto-load AGENTS.md; load steering via agent resources
-    K->>K: execute implementation-workflow skill
+    K->>K: execute implementation workflow per prompt instructions
     CA-->>K: structured implementation JSON
     K-->>W: stdout: structured implementation JSON
     W->>W: store run + artifacts, transition → validating
-    W->>K: invoke CLI --agent repo-engineer --skill validation-workflow
+    W->>K: invoke kiro-cli chat --agent repo-engineer --no-interactive <prompt for validation>
     K-->>W: structured validation JSON
     W->>W: transition → done
     W-->>H: task complete + summary

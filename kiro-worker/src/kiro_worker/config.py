@@ -6,7 +6,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "sqlite:///./kiro_worker.db"
     WORKSPACE_SAFE_ROOT: str = "/tmp/kiro-worker/workspaces"
-    KIRO_CLI_PATH: str = "kiro"
+    KIRO_CLI_PATH: str = "kiro-cli"
     KIRO_DEFAULT_AGENT: str = "repo-engineer"
     KIRO_CLI_TIMEOUT: int = 300
     LOG_LEVEL: str = "INFO"
