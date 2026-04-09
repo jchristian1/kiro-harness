@@ -253,7 +253,9 @@ This document defines the complete HTTP API contract for kiro-worker: all 11 end
 
 ## 5. POST /tasks/{id}/approve
 
-**Purpose:** Approve a task in `awaiting_approval`. The only mechanism to pass the approval gate. Immediately triggers an implementation run.
+**Purpose:** Reserved for explicit action-level blockers inside a run. Only valid when a task is in `awaiting_approval` due to a specialist being blocked on a risky or permissioned action.
+
+**This is NOT the normal post-analysis continuation path.** After a completed analysis task (`done`), the Project Lead / Project Manager creates a NEW task with `operation: implement_now` to start implementation. See the `henry_implement` tool.
 
 **State transition:** T6: `awaiting_approval → implementing`
 

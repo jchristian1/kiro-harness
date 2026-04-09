@@ -23,6 +23,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from typing import Callable, Awaitable
 
 from kiro_worker.config import settings
 
@@ -155,21 +156,24 @@ def build_prompt(skill: str, context: dict) -> str:
         )
     elif mode == "implement":
         schema_instruction = (
-            "You MUST respond with ONLY a single JSON object — no prose, no markdown, no explanation before or after it.\n\n"
-            "The JSON object MUST have exactly these fields:\n"
+            "You are implementing the changes described in the task context above.\n\n"
+            "Step 1: Use your tools to make the required code changes (read files, write files, run commands as needed).\n"
+            "Step 2: After completing all changes, output a single JSON object summarizing what you did.\n\n"
+            "The final JSON object MUST have exactly these fields:\n"
             "{\n"
             '  "schema_version": "1",\n'
             '  "mode": "implement",\n'
-            '  "headline": "<one sentence summary>",\n'
+            '  "headline": "<one sentence summary of what was implemented>",\n'
             '  "files_changed": [{"path": "<relative path>", "action": "created|modified|deleted", "description": "<what changed>"}],\n'
-            '  "changes_summary": "<prose summary>",\n'
+            '  "changes_summary": "<prose summary of all changes made>",\n'
             '  "validation_run": null,\n'
             '  "known_issues": [],\n'
             '  "follow_ups": [],\n'
             '  "recommended_next_step": "run_validation"\n'
             "}\n\n"
             'recommended_next_step must be one of: "run_validation", "request_review", "needs_follow_up"\n'
-            "files_changed must be a non-empty array.\n"
+            "files_changed must be a non-empty array listing every file you created, modified, or deleted.\n"
+            "Output the JSON object as your LAST message after completing all tool calls.\n"
         )
     elif mode == "validate":
         schema_instruction = (
@@ -202,31 +206,62 @@ def build_prompt(skill: str, context: dict) -> str:
 # JSON extraction
 # ---------------------------------------------------------------------------
 
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    ansi_escape = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub("", text)
+
+
 def _extract_json_from_output(stdout: str) -> dict | None:
     """
-    Extract the first top-level JSON object from stdout.
+    Extract the kiro output contract JSON object from stdout.
 
-    Kiro may emit log lines or prose before/after the JSON block.
-    We scan for the first '{' and attempt to parse from there.
+    Kiro emits the JSON as its last message, preceded by tool call logs and
+    code diffs that may contain many { } characters. Strategy:
+    1. Strip ANSI escape codes
+    2. Find the last occurrence of '"schema_version"' — that's inside the real JSON
+    3. Scan backward from there to find the opening {
+    4. Scan forward from there to find the matching closing }
     Returns the parsed dict, or None if no valid JSON object is found.
     """
-    stdout = stdout.strip()
+    stdout = _strip_ansi(stdout).strip()
     if not stdout:
         return None
 
-    # Find the first '{' and try to parse a JSON object from that position
-    start = stdout.find("{")
+    # Find the last occurrence of the schema_version key — unique to our contract JSON
+    marker = '"schema_version"'
+    marker_pos = stdout.rfind(marker)
+    if marker_pos == -1:
+        return None
+
+    # Scan backward from marker to find the opening {
+    start = stdout.rfind("{", 0, marker_pos)
     if start == -1:
         return None
 
-    # Try progressively shorter substrings from the last '}' backwards
-    end = stdout.rfind("}")
-    while end >= start:
-        candidate = stdout[start:end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            end = stdout.rfind("}", start, end)
+    # Scan forward from start to find the matching closing }
+    # Use a brace counter to handle nested objects
+    depth = 0
+    end = -1
+    for i in range(start, len(stdout)):
+        if stdout[i] == "{":
+            depth += 1
+        elif stdout[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end == -1:
+        return None
+
+    candidate = stdout[start:end + 1]
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
 
     return None
 
@@ -235,12 +270,45 @@ def _extract_json_from_output(stdout: str) -> dict | None:
 # Main invocation
 # ---------------------------------------------------------------------------
 
+def _extract_progress_message(line: str) -> str | None:
+    """
+    Extract a human-readable progress message from a kiro-cli stdout line.
+    Returns None if the line is not meaningful for progress reporting.
+    """
+    line = line.strip()
+    if not line or line.startswith("{"):
+        return None
+    # Strip ANSI escape codes
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[mGKHF]|\x1b\[\?[0-9]+[lh]|\x1b\[[\d;]*[A-Za-z]')
+    clean = ansi_escape.sub("", line).strip()
+    if not clean or len(clean) < 3:
+        return None
+    # Skip pure tool-call metadata lines
+    if clean.startswith("↱") or clean.startswith("⋮") or clean.startswith("-"):
+        return None
+    # Meaningful patterns
+    if any(kw in clean.lower() for kw in (
+        "reading", "writing", "creating", "modifying", "deleting",
+        "running", "executing", "scanning", "analyzing", "generating",
+        "applying", "checking", "installing", "cloning", "fetching",
+        "✓", "✗", "batch", "operation", "completed", "failed",
+    )):
+        return clean[:200]
+    # Lines starting with > are kiro-cli agent messages
+    if clean.startswith(">"):
+        msg = clean[1:].strip()
+        if msg and len(msg) > 5:
+            return msg[:200]
+    return None
+
+
 async def invoke_kiro(
     agent: str,
     workspace_path: str,
     skill: str,
     context: dict,
     timeout: int = 300,
+    on_progress: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> KiroInvocationResult:
     """
     Invoke kiro-cli using the documented `kiro-cli chat` interface.
@@ -250,8 +318,13 @@ async def invoke_kiro(
 
     --no-interactive runs headlessly without waiting for user input.
     --trust-all-tools auto-approves tool use (required with --no-interactive).
+
+    on_progress: optional async callback(message, partial_output) called as stdout
+    lines arrive. Used to write progress updates to the DB during long runs.
     """
     prompt = build_prompt(skill, context)
+    # Implement runs need more time — they do real work before producing output
+    effective_timeout = timeout * 2 if skill == "implementation-workflow" else timeout
     cmd = [
         settings.KIRO_CLI_PATH,
         "chat",
@@ -272,23 +345,50 @@ async def invoke_kiro(
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_path,
         )
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        async def read_stdout():
+            assert proc.stdout is not None
+            while True:
+                line_bytes = await proc.stdout.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8", errors="replace")
+                stdout_chunks.append(line)
+                if on_progress:
+                    msg = _extract_progress_message(line)
+                    if msg:
+                        partial = "".join(stdout_chunks)[-2000:]
+                        try:
+                            await on_progress(msg, partial)
+                        except Exception:
+                            pass  # progress updates are best-effort
+
+        async def read_stderr():
+            assert proc.stderr is not None
+            data = await proc.stderr.read()
+            stderr_chunks.append(data.decode("utf-8", errors="replace"))
+
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
+            await asyncio.wait_for(
+                asyncio.gather(read_stdout(), read_stderr(), proc.wait()),
+                timeout=effective_timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
             return KiroInvocationResult(
                 exit_code=-1,
-                stdout="",
-                stderr="",
+                stdout="".join(stdout_chunks),
+                stderr="".join(stderr_chunks),
                 parsed_output=None,
                 parse_status="parse_failed",
-                failure_reason=f"timeout:{timeout}s: process did not complete",
+                failure_reason=f"timeout:{effective_timeout}s: process did not complete",
             )
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
         exit_code = proc.returncode if proc.returncode is not None else 0
 
         if exit_code != 0:

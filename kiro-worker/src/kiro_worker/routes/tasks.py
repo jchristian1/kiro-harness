@@ -42,6 +42,8 @@ def _task_to_response(task, db: Session) -> TaskResponse:
             started_at=last_run.started_at,
             completed_at=last_run.completed_at,
             failure_reason=last_run.failure_reason,
+            progress_message=last_run.progress_message,
+            last_activity_at=last_run.last_activity_at,
         )
     return TaskResponse(
         id=task.id,
@@ -60,24 +62,57 @@ def _task_to_response(task, db: Session) -> TaskResponse:
 
 
 def _determine_next_status_after_run(task, mode: RunMode, parsed_output: dict) -> TaskStatus:
-    """Determine the next task status based on run mode and Kiro output."""
+    """
+    Determine the next task status based on run mode and Kiro output.
+
+    Architecture model:
+    - A task represents one bounded specialist execution unit.
+    - A completed specialist run returns control to the Project Lead / Project Manager.
+    - The Project Lead handles the user-facing conversation and creates a NEW task
+      for the next bounded run (implement, deploy, test, etc.).
+    - Only real in-run blockers (risky actions, missing clarification) keep a task waiting.
+    - awaiting_approval is NOT used for normal post-analysis continuation.
+      It is reserved for explicit action-level blockers inside a run.
+
+    Analyze run outcomes:
+      no_action_needed       -> done  (nothing to do)
+      request_clarification  -> awaiting_revision  (Kiro needs more input before proceeding)
+      approve_and_implement  + implement_now -> implementing  (immediate, no gate)
+      approve_and_implement  + any other operation -> done  (Project Lead creates next task)
+
+    Implement run outcomes:
+      run_validation         -> validating
+      request_review / needs_follow_up -> awaiting_revision
+
+    Validate run outcomes:
+      passed=True            -> done
+      passed=False           -> awaiting_revision
+    """
     rns = parsed_output.get("recommended_next_step", "")
     operation = Operation(task.operation)
 
     if mode == RunMode.analyze:
+        # Kiro says nothing to do
         if rns == "no_action_needed":
             return TaskStatus.done
+
+        # Kiro needs clarification before it can proceed
+        if rns == "request_clarification":
+            return TaskStatus.awaiting_revision
+
+        # rns == "approve_and_implement" — Kiro finished analysis cleanly
         if operation == Operation.implement_now:
+            # Caller explicitly requested immediate implementation — no gate
             return TaskStatus.implementing
-        if operation == Operation.plan_only:
-            return TaskStatus.done
-        # analyze_then_approve or implement_and_prepare_pr
-        return TaskStatus.awaiting_approval
+
+        # All other operations (plan_only, analyze_then_approve, implement_and_prepare_pr):
+        # Analysis is done. Project Lead reads the artifact and creates the next task.
+        return TaskStatus.done
 
     elif mode == RunMode.implement:
-        if rns in ("run_validation",):
+        if rns == "run_validation":
             return TaskStatus.validating
-        # request_review or needs_follow_up
+        # request_review or needs_follow_up — Project Lead reviews before next step
         return TaskStatus.awaiting_revision
 
     elif mode == RunMode.validate:
@@ -87,6 +122,13 @@ def _determine_next_status_after_run(task, mode: RunMode, parsed_output: dict) -
         return TaskStatus.awaiting_revision
 
     return TaskStatus.failed
+
+
+def _make_progress_callback(db: Session, run):
+    """Return a proper async callback for progress updates during streaming."""
+    async def on_progress(msg: str, partial: str) -> None:
+        run_service.update_progress(db, run, msg, partial)
+    return on_progress
 
 
 async def _execute_run(
@@ -115,6 +157,7 @@ async def _execute_run(
         skill=skill,
         context=context,
         timeout=settings.KIRO_CLI_TIMEOUT,
+        on_progress=_make_progress_callback(db, run),
     )
 
     if result.parse_status == "ok" and result.parsed_output:

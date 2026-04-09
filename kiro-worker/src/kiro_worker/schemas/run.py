@@ -14,6 +14,8 @@ class RunSummary(BaseModel):
     started_at: str
     completed_at: Optional[str]
     failure_reason: Optional[str]
+    progress_message: Optional[str] = None
+    last_activity_at: Optional[str] = None
 
 
 class RunListItem(BaseModel):
@@ -42,6 +44,9 @@ class RunResponse(BaseModel):
     failure_reason: Optional[str]
     started_at: str
     completed_at: Optional[str]
+    progress_message: Optional[str] = None
+    last_activity_at: Optional[str] = None
+    partial_output: Optional[str] = None
 
 
 class RunCreateResponse(BaseModel):

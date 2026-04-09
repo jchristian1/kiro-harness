@@ -102,6 +102,21 @@ def create_artifact(
     return artifact
 
 
+def update_progress(
+    db: Session,
+    run: Run,
+    progress_message: str,
+    partial_output: str | None = None,
+) -> Run:
+    """Update progress fields on an active run. Called during streaming execution."""
+    run.progress_message = progress_message
+    run.last_activity_at = _now()
+    if partial_output is not None:
+        run.partial_output = partial_output[-2000:]  # rolling 2000-char window
+    db.commit()
+    return run
+
+
 def get_run(db: Session, run_id: str) -> Run | None:
     return db.query(Run).filter(Run.id == run_id).first()
 

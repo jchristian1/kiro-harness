@@ -7,20 +7,28 @@ ALLOWED_TRANSITIONS: dict[tuple[TaskStatus, TaskStatus], bool] = {
     (TaskStatus.created, TaskStatus.opening): True,
     # T2: opening → analyzing
     (TaskStatus.opening, TaskStatus.analyzing): True,
+    # T2-variant: opening → implementing (implement_now — no analysis step)
+    (TaskStatus.opening, TaskStatus.implementing): True,
     # T3: opening → failed
     (TaskStatus.opening, TaskStatus.failed): True,
     # T4: analyzing → awaiting_approval (analyze_then_approve / implement_and_prepare_pr)
     (TaskStatus.analyzing, TaskStatus.awaiting_approval): True,
     # T4-variant: analyzing → implementing (implement_now)
     (TaskStatus.analyzing, TaskStatus.implementing): True,
-    # T4-variant: analyzing → done (plan_only)
+    # T4-variant: analyzing → done (plan_only or no_action_needed)
     (TaskStatus.analyzing, TaskStatus.done): True,
+    # T4-variant: analyzing → awaiting_revision (request_clarification — Kiro needs more input)
+    (TaskStatus.analyzing, TaskStatus.awaiting_revision): True,
     # T5: analyzing → failed
     (TaskStatus.analyzing, TaskStatus.failed): True,
     # T6: awaiting_approval → implementing (APPROVAL GATE)
     (TaskStatus.awaiting_approval, TaskStatus.implementing): True,
     # T8: implementing → validating
     (TaskStatus.implementing, TaskStatus.validating): True,
+    # T8-variant: implementing → awaiting_revision (request_review or needs_follow_up)
+    (TaskStatus.implementing, TaskStatus.awaiting_revision): True,
+    # T8-variant: implementing → done (if validation is skipped)
+    (TaskStatus.implementing, TaskStatus.done): True,
     # T9: implementing → failed
     (TaskStatus.implementing, TaskStatus.failed): True,
     # T10: validating → done

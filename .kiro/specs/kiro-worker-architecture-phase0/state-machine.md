@@ -19,17 +19,19 @@ These are the only valid values for `tasks.status`. No other values are permitte
 |---|---|---|---|
 | `created` | Task record exists in DB; workspace not yet opened | No | No |
 | `opening` | Worker is opening, cloning, or validating the workspace | No | No |
-| `analyzing` | Kiro CLI is running the `analysis-workflow` skill | No | No |
-| `awaiting_approval` | Analysis complete; waiting for explicit user approval before implementing | No | Yes |
-| `implementing` | Kiro CLI is running the `implementation-workflow` skill | No | No |
-| `validating` | Kiro CLI is running the `validation-workflow` skill | No | No |
-| `awaiting_revision` | Validation found issues; waiting for user direction on how to proceed | No | Yes |
-| `done` | Task complete; all runs stored; artifacts available | Yes | No |
+| `analyzing` | Specialist CLI is running the analysis skill | No | No |
+| `awaiting_approval` | Reserved for explicit action-level blockers inside a run (risky ops, missing permissions) | No | Yes |
+| `implementing` | Specialist CLI is running the implementation skill | No | No |
+| `validating` | Specialist CLI is running the validation skill | No | No |
+| `awaiting_revision` | Specialist needs more input (clarification, revision instructions) or validation found issues | No | Yes |
+| `done` | Task complete; all runs stored; artifacts available. Project Lead / Project Manager reads results and decides next action. | Yes | No |
 | `failed` | Terminal failure; see `failure_reason` on the last Run record | Yes | No |
 
 **Terminal states:** `done` and `failed`. No transition out of a terminal state is permitted.
 
-**Resumable states:** `awaiting_approval` and `awaiting_revision`. These are the only states where the task is paused waiting for human input and can be continued after a worker restart or reconnect.
+**Resumable states:** `awaiting_approval` and `awaiting_revision`.
+
+**Architecture note:** A task represents one bounded specialist execution unit. When a specialist finishes a run and is not blocked, the task ends as `done`. The Project Lead / Project Manager handles the user-facing conversation and creates a NEW task for the next bounded run (implement, deploy, test, etc.). The `awaiting_approval` state is reserved for explicit action-level blockers inside a run — it is NOT used as a default post-analysis gate.
 
 ---
 
@@ -42,10 +44,11 @@ Every allowed transition is listed here. Any transition not in this table is for
 | T1 | `created` | `opening` | `POST /tasks/{id}/runs` (mode=analyze) or workspace open initiated | Worker (internal) | No | Yes — immediately after task creation when a run is triggered |
 | T2 | `opening` | `analyzing` | Workspace open/clone/validate succeeds | Worker (internal) | No | Yes |
 | T3 | `opening` | `failed` | Workspace open/clone/validate fails | Worker (internal) | No | Yes |
-| T4 | `analyzing` | `awaiting_approval` | Kiro CLI analysis run completes successfully; artifact stored | Worker (internal) | No | Yes |
+| T4 | `analyzing` | `done` | Kiro analysis run completes; `recommended_next_step` is `approve_and_implement` with non-`implement_now` operation, or `no_action_needed` | Worker (internal) | No | Yes — Project Lead creates next task if needed |
+| T4-variant | `analyzing` | `implementing` | Kiro analysis run completes; operation is `implement_now` | Worker (internal) | No | Yes |
+| T4-variant | `analyzing` | `awaiting_revision` | Kiro analysis run completes; `recommended_next_step` is `request_clarification` | Worker (internal) | No | Yes |
 | T5 | `analyzing` | `failed` | Kiro CLI analysis run fails (non-zero exit, timeout, parse failure, schema invalid) | Worker (internal) | No | Yes |
-| T6 | `awaiting_approval` | `implementing` | `POST /tasks/{id}/approve` received | Henry (on behalf of user) | **Yes — approval gate** | No — requires explicit API call |
-| T7 | `awaiting_approval` | _(no transition)_ | `POST /tasks/{id}/runs` called without prior approval | Worker (internal) | N/A | Yes — immediate rejection with 409 `APPROVAL_REQUIRED`; task stays in `awaiting_approval` |
+| T6 | `awaiting_approval` | `implementing` | `POST /tasks/{id}/approve` received (reserved for explicit action-level blockers) | Project Lead (on behalf of user) | **Yes — action-level gate** | No — requires explicit API call |
 | T8 | `implementing` | `validating` | Kiro CLI implementation run completes successfully; artifact stored | Worker (internal) | No | Yes |
 | T9 | `implementing` | `failed` | Kiro CLI implementation run fails | Worker (internal) | No | Yes |
 | T10 | `validating` | `done` | Kiro CLI validation run completes with pass status | Worker (internal) | No | Yes |
@@ -97,13 +100,15 @@ Per `architecture.md`, approval is required before any non-trivial implementatio
 
 ## Standard Flow
 
-### analyze_then_approve (default)
+### analyze_then_approve (new model — one task per bounded run)
 
 ```
-created → opening → analyzing → awaiting_approval → implementing → validating → done
+Analysis task:   created → opening → analyzing → done
+Implementation task (new task, created by Project Lead after user approves):
+                 created → opening → implementing → validating → done
 ```
 
-Each arrow represents an automatic transition except `awaiting_approval → implementing`, which requires `POST /tasks/{id}/approve`.
+The Project Lead reads the analysis artifact from the completed task, presents findings to the user, and creates a new task with `operation: implement_now` when the user approves.
 
 ### implement_now
 
@@ -111,7 +116,7 @@ Each arrow represents an automatic transition except `awaiting_approval → impl
 created → opening → implementing → validating → done
 ```
 
-No analysis step, no approval gate. The worker skips directly to implementation.
+No analysis step. Used when the Project Lead creates an implementation task directly.
 
 ### plan_only
 
@@ -119,15 +124,15 @@ No analysis step, no approval gate. The worker skips directly to implementation.
 created → opening → analyzing → done
 ```
 
-No implementation or validation. Task completes after analysis artifact is stored.
+Analysis only. No implementation or validation.
 
 ### With revision loop
 
 ```
-created → opening → analyzing → awaiting_approval → implementing → validating → awaiting_revision → implementing → validating → done
+created → opening → implementing → validating → awaiting_revision → implementing → validating → done
 ```
 
-The `awaiting_revision → implementing → validating` loop may repeat as many times as needed until validation passes or the task is marked `failed`.
+The `awaiting_revision → implementing → validating` loop may repeat until validation passes.
 
 ---
 

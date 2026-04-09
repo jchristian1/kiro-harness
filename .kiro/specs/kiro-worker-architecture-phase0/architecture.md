@@ -13,14 +13,16 @@ This document defines the role of every layer in the system, the boundaries betw
 | Layer | Component | Role |
 |---|---|---|
 | UI | Telegram | User-facing interface only. Sends messages, receives replies. No business logic. |
-| Orchestrator | Henry (OpenClaw agent) | PM / tech lead. Classifies requests, calls worker, communicates results. Thin by design. |
-| Routing rules | Henry skill | Encodes routing logic, clarification policy, approval rules, summary formatting. Loaded by Henry. |
-| System of record | kiro-worker | Backend. Owns all project/task/run/artifact state. Calls Kiro CLI. Enforces approval policy. |
-| Engineering execution | Kiro CLI | Executes analysis, implementation, validation. Invoked as subprocess by worker. |
+| Orchestrator | Project Lead / Project Manager (e.g. Henry, OpenClaw agent) | Handles user-facing conversation, presents specialist findings, recommends next steps, creates new tasks based on user decisions. Thin by design. |
+| Routing rules | Project Lead skill | Encodes routing logic, clarification policy, summary formatting, next-task creation. |
+| System of record | kiro-worker | Backend. Owns all project/task/run/artifact state. Calls specialist CLIs. Enforces action-level approval policy. |
+| Engineering execution | Kiro CLI (specialist) | Executes analysis, implementation, validation. Invoked as subprocess by worker. |
 | Role configuration | Kiro custom agents | Per-role tool permissions, model selection, resource access, system prompt. Defined in `.kiro/agents/`. |
 | Persistent context | `.kiro/steering/` + `AGENTS.md` | Engineering standards and workspace context. `AGENTS.md` is always included. Steering files must be explicitly declared in the agent's `resources` to be loaded. |
 | Reusable workflows | Kiro skills | Portable workflow instruction packages. Used for analysis and implementation workflows. |
 | Continuity | Workspace + Registry | Filesystem workspaces + SQLite registry. Provides resume, lookup, artifact storage. |
+
+**Scalability note:** The specialist execution layer (currently Kiro) is designed to be replaceable or extended with other specialist agents (deployment, UI testing, QA, security, infra/ops). Each specialist follows the same pattern: bounded execution, structured output, `done` on completion, `awaiting_revision` when blocked on input.
 
 ---
 
@@ -32,22 +34,25 @@ This document defines the role of every layer in the system, the boundaries betw
 - Capture user input and forward to Henry
 - No knowledge of tasks, projects, or execution state
 
-### Henry (OpenClaw agent)
+### Project Lead / Project Manager (e.g. Henry)
 
 **Owns:**
-- Request classification (Intent + Source + Operation)
-- Minimal clarifying questions
+- User-facing conversation
+- Presenting specialist findings to the user
+- Strategic recommendations (implement, research more, deploy, test, stop)
+- Creating new tasks based on user decisions
 - Worker API calls
 - Result summarization for the user
-- Approval request/response relay
 
 **Does not own:**
 - Project or task state
 - Workspace paths or repo logic
-- Kiro execution or output parsing
-- Approval policy decisions (those are in the worker)
+- Specialist execution or output parsing
+- Action-level approval decisions (those are in the worker)
 
-**Rule:** Henry must remain thin. If Henry is doing repo reasoning, execution logic, or state management, the architecture is wrong.
+**Rule:** The Project Lead must remain thin. If it is doing repo reasoning, execution logic, or state management, the architecture is wrong.
+
+**Post-analysis flow:** When a specialist completes an analysis task (`done`), the Project Lead presents the findings and asks the user what to do next. If the user approves implementation, the Project Lead creates a NEW task with `operation: implement_now`. It does NOT revive the old task or call `/approve` on it.
 
 ### Henry skill (project-routing-and-delivery)
 

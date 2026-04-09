@@ -103,6 +103,10 @@ class Run(Base):
     failure_reason: Mapped[str | None] = mapped_column(nullable=True)
     started_at: Mapped[str] = mapped_column(nullable=False)
     completed_at: Mapped[str | None] = mapped_column(nullable=True)
+    # Progress tracking for long-running specialist runs
+    progress_message: Mapped[str | None] = mapped_column(nullable=True)
+    last_activity_at: Mapped[str | None] = mapped_column(nullable=True)
+    partial_output: Mapped[str | None] = mapped_column(nullable=True)
 
 
 class Artifact(Base):
