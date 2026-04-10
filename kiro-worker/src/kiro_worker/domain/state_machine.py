@@ -41,11 +41,23 @@ ALLOWED_TRANSITIONS: dict[tuple[TaskStatus, TaskStatus], bool] = {
     (TaskStatus.awaiting_revision, TaskStatus.implementing): True,
     # T14: awaiting_revision → failed
     (TaskStatus.awaiting_revision, TaskStatus.failed): True,
+    # T15: validating → done (Project Lead closes without running validation)
+    # T16: awaiting_revision → done (Project Lead closes)
+    # T17: failed → done (Project Lead closes after reviewing)
+    (TaskStatus.validating, TaskStatus.done): True,
+    (TaskStatus.awaiting_revision, TaskStatus.done): True,
+    (TaskStatus.failed, TaskStatus.done): True,
     # Retry from failed: re-enter appropriate in-progress states
     (TaskStatus.failed, TaskStatus.opening): True,
     (TaskStatus.failed, TaskStatus.analyzing): True,
     (TaskStatus.failed, TaskStatus.implementing): True,
     (TaskStatus.failed, TaskStatus.validating): True,
+    # Cancellation: any active in-progress state → awaiting_revision
+    # The Project Manager cancelled the run; task is not complete but not failed
+    (TaskStatus.opening, TaskStatus.awaiting_revision): True,
+    (TaskStatus.analyzing, TaskStatus.awaiting_revision): True,
+    (TaskStatus.implementing, TaskStatus.awaiting_revision): True,
+    (TaskStatus.validating, TaskStatus.awaiting_revision): True,
 }
 
 TERMINAL_STATES: frozenset[TaskStatus] = frozenset({TaskStatus.done, TaskStatus.failed})

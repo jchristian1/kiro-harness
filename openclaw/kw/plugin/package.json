@@ -1,0 +1,27 @@
+{
+  "name": "@kiro-worker/kw-worker-tools",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenClaw-native tool plugin for Henry Phase 1.5 — deterministic kiro-worker operations",
+  "main": "./src/index.ts",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24-beta.2",
+      "pluginSdkVersion": "2026.3.24-beta.2"
+    }
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.35"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}

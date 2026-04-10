@@ -91,6 +91,9 @@ def _validate_implementation(data: dict) -> str | None:
     rns = data.get("recommended_next_step")
     if rns not in IMPLEMENTATION_NEXT_STEPS:
         return f"schema_invalid: .recommended_next_step: expected {IMPLEMENTATION_NEXT_STEPS}, got '{rns}'"
+    # already_satisfied is optional boolean — if present must be bool
+    if "already_satisfied" in data and not isinstance(data.get("already_satisfied"), bool):
+        return "schema_invalid: .already_satisfied: expected boolean"
     return None
 
 
@@ -137,12 +140,17 @@ def build_prompt(skill: str, context: dict) -> str:
     if mode == "analyze":
         schema_instruction = (
             "You MUST respond with ONLY a single JSON object — no prose, no markdown, no explanation before or after it.\n\n"
+            "IMPORTANT GUARDRAIL: Before recommending any implementation step, you MUST verify whether an equivalent capability already exists in the codebase.\n"
+            "- If the improvement is already present: set recommended_next_step to 'no_action_needed' and explain in findings.\n"
+            "- If the improvement is partially present: note this explicitly in findings and risks.\n"
+            "- If you are uncertain whether it exists: add it to questions and set recommended_next_step to 'request_clarification'.\n"
+            "- Only set recommended_next_step to 'approve_and_implement' when you have verified the improvement is genuinely missing.\n\n"
             "The JSON object MUST have exactly these fields:\n"
             "{\n"
             '  "schema_version": "1",\n'
             '  "mode": "analyze",\n'
             '  "headline": "<one sentence summary, max 200 chars>",\n'
-            '  "findings": ["<finding 1>", "<finding 2>"],\n'
+            '  "findings": ["<finding 1 — include whether improvement already exists>", "<finding 2>"],\n'
             '  "affected_areas": ["<file or module path>"],\n'
             '  "tradeoffs": [],\n'
             '  "risks": [],\n'
@@ -153,26 +161,32 @@ def build_prompt(skill: str, context: dict) -> str:
             "}\n\n"
             'recommended_next_step must be one of: "approve_and_implement", "request_clarification", "no_action_needed"\n'
             "findings and implementation_steps must be non-empty arrays.\n"
+            "If recommended_next_step is 'no_action_needed', implementation_steps should explain why no change is needed.\n"
         )
     elif mode == "implement":
         schema_instruction = (
             "You are implementing the changes described in the task context above.\n\n"
-            "Step 1: Use your tools to make the required code changes (read files, write files, run commands as needed).\n"
-            "Step 2: After completing all changes, output a single JSON object summarizing what you did.\n\n"
+            "Step 1: Read the relevant files to understand the current state.\n"
+            "Step 2: Check whether the requested change is already present. If it is already implemented, do NOT make redundant changes — instead document this in your summary.\n"
+            "Step 3: Make only the required code changes (write files, run commands as needed).\n"
+            "Step 4: After completing all work, output a single JSON object summarizing what you did.\n\n"
             "The final JSON object MUST have exactly these fields:\n"
             "{\n"
             '  "schema_version": "1",\n'
             '  "mode": "implement",\n'
-            '  "headline": "<one sentence summary of what was implemented>",\n'
+            '  "headline": "<one sentence summary of what was implemented or why no change was needed>",\n'
             '  "files_changed": [{"path": "<relative path>", "action": "created|modified|deleted", "description": "<what changed>"}],\n'
-            '  "changes_summary": "<prose summary of all changes made>",\n'
+            '  "changes_summary": "<detailed prose: what was requested, what you found, what you changed, what validation you ran, what was blocked, main risk or caveat>",\n'
+            '  "already_satisfied": false,\n'
             '  "validation_run": null,\n'
             '  "known_issues": [],\n'
             '  "follow_ups": [],\n'
             '  "recommended_next_step": "run_validation"\n'
             "}\n\n"
             'recommended_next_step must be one of: "run_validation", "request_review", "needs_follow_up"\n'
-            "files_changed must be a non-empty array listing every file you created, modified, or deleted.\n"
+            "files_changed must be a non-empty array. If no files changed because the improvement was already present, use a single entry with action='modified' and description='No change needed — capability already exists'.\n"
+            "Set already_satisfied=true if the requested improvement was already present in the codebase.\n"
+            "changes_summary must be detailed: include what was requested, what you found, what changed, what validation ran, what was blocked, and the main risk.\n"
             "Output the JSON object as your LAST message after completing all tool calls.\n"
         )
     elif mode == "validate":
@@ -309,6 +323,7 @@ async def invoke_kiro(
     context: dict,
     timeout: int = 300,
     on_progress: Callable[[str, str], Awaitable[None]] | None = None,
+    on_process: Callable[["asyncio.subprocess.Process"], None] | None = None,
 ) -> KiroInvocationResult:
     """
     Invoke kiro-cli using the documented `kiro-cli chat` interface.
@@ -345,6 +360,10 @@ async def invoke_kiro(
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_path,
         )
+
+        # Register process for potential cancellation
+        if on_process:
+            on_process(proc)
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []

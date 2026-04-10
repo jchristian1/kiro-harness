@@ -86,7 +86,7 @@ class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
         CheckConstraint("mode IN ('analyze','implement','validate')", name="ck_runs_mode"),
-        CheckConstraint("status IN ('running','completed','parse_failed','error')", name="ck_runs_status"),
+        CheckConstraint("status IN ('running','completed','parse_failed','error','cancelled')", name="ck_runs_status"),
         CheckConstraint("parse_status IN ('ok','parse_failed','schema_invalid')", name="ck_runs_parse_status"),
         Index("idx_runs_task_id", "task_id"),
     )

@@ -13,8 +13,8 @@ This document defines the role of every layer in the system, the boundaries betw
 | Layer | Component | Role |
 |---|---|---|
 | UI | Telegram | User-facing interface only. Sends messages, receives replies. No business logic. |
-| Orchestrator | Project Lead / Project Manager (e.g. Henry, OpenClaw agent) | Handles user-facing conversation, presents specialist findings, recommends next steps, creates new tasks based on user decisions. Thin by design. |
-| Routing rules | Project Lead skill | Encodes routing logic, clarification policy, summary formatting, next-task creation. |
+| Orchestrator | Project Manager (OpenClaw agent) | Handles user-facing conversation, presents specialist findings, recommends next steps, creates new tasks based on user decisions. Thin by design. |
+| Routing rules | Project Manager skills | Encodes routing logic, clarification policy, summary formatting, next-task creation. |
 | System of record | kiro-worker | Backend. Owns all project/task/run/artifact state. Calls specialist CLIs. Enforces action-level approval policy. |
 | Engineering execution | Kiro CLI (specialist) | Executes analysis, implementation, validation. Invoked as subprocess by worker. |
 | Role configuration | Kiro custom agents | Per-role tool permissions, model selection, resource access, system prompt. Defined in `.kiro/agents/`. |
@@ -30,18 +30,18 @@ This document defines the role of every layer in the system, the boundaries betw
 
 ### Telegram
 
-- Render messages from Henry
-- Capture user input and forward to Henry
+- Render messages from the Project Manager
+- Capture user input and forward to the Project Manager
 - No knowledge of tasks, projects, or execution state
 
-### Project Lead / Project Manager (e.g. Henry)
+### Project Manager (OpenClaw agent)
 
 **Owns:**
 - User-facing conversation
 - Presenting specialist findings to the user
 - Strategic recommendations (implement, research more, deploy, test, stop)
 - Creating new tasks based on user decisions
-- Worker API calls
+- Worker API calls (via `kw-worker-tools` plugin)
 - Result summarization for the user
 
 **Does not own:**
@@ -50,11 +50,11 @@ This document defines the role of every layer in the system, the boundaries betw
 - Specialist execution or output parsing
 - Action-level approval decisions (those are in the worker)
 
-**Rule:** The Project Lead must remain thin. If it is doing repo reasoning, execution logic, or state management, the architecture is wrong.
+**Rule:** The Project Manager must remain thin. If it is doing repo reasoning, execution logic, or state management, the architecture is wrong.
 
-**Post-analysis flow:** When a specialist completes an analysis task (`done`), the Project Lead presents the findings and asks the user what to do next. If the user approves implementation, the Project Lead creates a NEW task with `operation: implement_now`. It does NOT revive the old task or call `/approve` on it.
+**Post-analysis flow:** When a specialist completes an analysis task (`done`), the Project Manager presents the findings and asks the user what to do next. If the user approves implementation, the Project Manager creates a NEW task with `operation: implement_now`. It does NOT revive the old task or call `/approve` on it.
 
-### Henry skill (project-routing-and-delivery)
+### Project Manager skills (project-routing-and-delivery)
 
 - Routing rules: which worker endpoint to call for which intent
 - Clarification rules: when to ask, what to ask, when to proceed without asking
@@ -79,9 +79,9 @@ This document defines the role of every layer in the system, the boundaries betw
 - Audit log: every state transition and Kiro invocation recorded
 
 **Does not own:**
-- User communication (that is Henry's job)
+- User communication (that is the Project Manager role)
 - Telegram-specific formatting
-- Henry's classification logic
+- classification logic (owned by the Project Manager)
 - Kiro session history (worker DB is the system of record, not Kiro's internal history)
 
 **Rule:** The worker is the single source of truth. If state exists somewhere else, it is a cache or a view — not authoritative.
@@ -135,7 +135,7 @@ This document defines the role of every layer in the system, the boundaries betw
 
 ## Intent / Source / Operation Model
 
-Every request Henry receives is classified into three dimensions before calling the worker.
+Every request the Project Manager receives is classified into three dimensions before calling the worker.
 
 ### Intent
 
@@ -176,20 +176,20 @@ Every request Henry receives is classified into three dimensions before calling 
 The worker invokes `kiro-cli` as a subprocess using the `chat` subcommand:
 
 ```
-kiro-cli chat --agent <agent> --no-interactive <prompt>
+kiro-cli chat --no-interactive --trust-all-tools <prompt>
 ```
 
 Run with `cwd=workspace_path`.
 
 | Parameter | Source | Notes |
 |---|---|---|
-| `--agent` | worker config | Which agent/context profile to use (e.g., `repo-engineer`) |
 | `--no-interactive` | always set | Runs headlessly without waiting for user input — required for subprocess use |
+| `--trust-all-tools` | always set | Auto-approves all tool use — required when running with `--no-interactive` |
 | `<prompt>` | task + run record | Constructed by the worker: skill name, task context (intent, description, prior analysis, approved plan), and output schema instructions |
 
-The worker captures stdout, attempts JSON parse, validates against the output contract schema, and stores the result. If parse fails, the run is marked `parse_failed` and the task transitions to `failed`.
+The worker captures stdout line-by-line during execution, writing progress updates to the run record (`progress_message`, `last_activity_at`, `partial_output`). On completion it attempts JSON parse, validates against the output contract schema, and stores the result. If parse fails, the run is marked `parse_failed` and the task transitions to `failed`.
 
-**Note:** `kiro-cli` (the terminal CLI at `~/.local/bin/kiro-cli`) is a separate binary from the Kiro IDE launcher (`/usr/bin/kiro`). Install with: `curl -fsSL https://cli.kiro.dev/install | bash`
+**Note:** `kiro-cli` is a separate binary from the Kiro IDE launcher. The IDE launcher is typically at `/usr/bin/kiro`; `kiro-cli` is installed separately (e.g., at `~/.local/bin/kiro-cli`) and is the only binary used by the worker. Install with: `curl -fsSL https://cli.kiro.dev/install | bash`
 
 ### Custom Agent: `repo-engineer` (Phase 1)
 
@@ -229,24 +229,24 @@ The worker captures stdout, attempts JSON parse, validates against the output co
 
 ### Actions that always require approval
 
-- Any implementation after analysis (in `analyze_then_approve` mode)
-- Destructive file operations (delete, overwrite without backup)
+- Destructive file operations (delete, overwrite without backup) — when Kiro signals `awaiting_approval` mid-run
 - Push to remote branch
 - PR creation or merge
-- Major architectural changes (as flagged by Kiro in analysis output)
-- Any action on a repo the worker has not previously opened (first-time access)
+- Major architectural changes flagged by Kiro as requiring explicit authorization
+
+**Note:** `analyze_then_approve` operation mode does NOT use the `awaiting_approval` state as a post-analysis gate. Analysis tasks end as `done`. The Project Manager presents findings to the user and creates a new `implement_now` task when the user approves. The `awaiting_approval` state is reserved for explicit action-level blockers inside a run.
 
 ### Actions that are safe without approval
 
 - Analysis and read-only inspection
 - Plan generation
+- Implementation (standard `implement_now` tasks)
 - Creating a new workspace (no existing code at risk)
 - Retrieving task status or run history
-- Resuming a previously approved task that was interrupted
 
 ### Approval enforcement
 
-The worker enforces approval — not Henry, not Kiro. When a task reaches `awaiting_approval`, the worker will not transition to `implementing` until it receives an explicit `POST /tasks/{id}/approve` call. Henry relays the approval from the user; the worker enforces the gate.
+The worker enforces approval — not the Project Manager, not Kiro. When a task reaches `awaiting_approval`, the worker will not transition to `implementing` until it receives an explicit `POST /tasks/{id}/approve` call. The Project Manager relays the approval from the user; the worker enforces the gate.
 
 ---
 
@@ -257,7 +257,7 @@ The worker enforces approval — not Henry, not Kiro. When a task reaches `await
 ```mermaid
 sequenceDiagram
     participant U as User (Telegram)
-    participant H as Henry
+    participant H as Project Manager
     participant W as kiro-worker
     participant K as Kiro CLI
     participant CA as repo-engineer agent
@@ -265,26 +265,26 @@ sequenceDiagram
 
     U->>H: "Add auth to my storefront repo"
     H->>H: classify → intent=add_feature, source=local_repo, op=analyze_then_approve
-    H->>W: POST /tasks {project_id, intent, source, operation}
+    H->>W: POST /tasks/{id}/runs/start {mode=analyze} (via kw_local_folder_analyze)
     W->>WS: open/validate workspace
-    W->>K: invoke kiro-cli chat --agent repo-engineer --no-interactive <prompt>
+    W->>K: invoke kiro-cli chat --no-interactive --trust-all-tools <prompt>
     K->>CA: load agent config + tools + permissions
     K->>K: execute analysis workflow per prompt instructions
     CA-->>K: structured analysis JSON
     K-->>W: stdout: structured analysis JSON
-    W->>W: parse + validate against output contract
-    W->>W: store run + artifacts, transition → awaiting_approval
+    W->>W: strip ANSI, extract JSON via schema_version anchor, validate schema
+    W->>W: store run + artifacts, transition → done
     W-->>H: task status + analysis summary
     H-->>U: "Here's what I found. Approve to proceed?"
     U->>H: "Yes, go ahead"
-    H->>W: POST /tasks/{id}/approve
-    W->>K: invoke kiro-cli chat --agent repo-engineer --no-interactive <prompt with approved_plan>
+    H->>W: POST /tasks (new task, operation=implement_now) + POST /tasks/{id}/runs/start
+    W->>K: invoke kiro-cli chat --no-interactive --trust-all-tools <prompt with prior_analysis>
     K->>CA: load agent config
     K->>K: execute implementation workflow per prompt instructions
     CA-->>K: structured implementation JSON
     K-->>W: stdout: structured implementation JSON
     W->>W: store run + artifacts, transition → validating
-    W->>K: invoke kiro-cli chat --agent repo-engineer --no-interactive <prompt for validation>
+    W->>K: invoke kiro-cli chat --no-interactive --trust-all-tools <prompt for validation>
     K-->>W: structured validation JSON
     W->>W: transition → done
     W-->>H: task complete + summary
@@ -296,16 +296,16 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant H as Henry
+    participant H as Project Manager
     participant W as kiro-worker
 
     U->>H: "Continue the storefront auth task"
     H->>W: GET /projects/{id}/active-task
-    W-->>H: task {id, state=awaiting_approval, last_run_summary}
-    H-->>U: "You have a pending approval. Here's the analysis. Approve?"
-    U->>H: "Yes"
-    H->>W: POST /tasks/{id}/approve
-    W->>W: resume from awaiting_approval → implementing
+    W-->>H: task {id, state=awaiting_revision, last_run_summary}
+    H-->>U: "Implementation needs revision. Here's what Kiro found. Instructions?"
+    U->>H: "Fix the login route to return 401"
+    H->>W: POST /tasks/{id}/revise {instructions: "Fix the login route to return 401"}
+    W->>W: resume from awaiting_revision → implementing
 ```
 
 **Resume rule:** Worker reconstructs Kiro context from its own DB (task record + last run artifacts). It does not rely on Kiro session history. Every Kiro invocation is stateless from Kiro's perspective; the worker provides all necessary context.
@@ -332,7 +332,7 @@ This table is the definitive answer to "where does X live?"
 
 ## Why the Worker is the Source of Truth
 
-1. Henry is stateless by design — he cannot be the source of truth
+1. The Project Manager is stateless by design — it cannot be the source of truth
 2. Kiro CLI is invoked as a subprocess — it receives context, executes, returns output, done
 3. Telegram is a UI — it has no persistence
 4. The workspace filesystem holds code artifacts but not task metadata
@@ -343,16 +343,16 @@ This table is the definitive answer to "where does X live?"
 
 ---
 
-## Why Henry Must Remain Thin
+## Why the Project Manager Must Remain Thin
 
-Henry's value is judgment and communication, not execution. If Henry accumulates execution logic:
+The Project Manager's value is judgment and communication, not execution. If it accumulates execution logic:
 
-- The system becomes prompt-fragile (Henry's behavior changes with model updates)
-- State gets split between Henry's context and the worker's DB
+- The system becomes prompt-fragile (behavior changes with model updates)
+- State gets split between the Project Manager's context and the worker's DB
 - Debugging becomes impossible (which layer made the decision?)
 - Scaling to multiple users or concurrent tasks breaks
 
-**The rule:** Henry knows what to do. The worker knows what is happening. Kiro knows how to do it.
+**The rule:** The Project Manager knows what to do. The worker knows what is happening. Kiro knows how to do it.
 
 ---
 
@@ -407,7 +407,7 @@ Without this declaration in the agent config, steering files are silently absent
 
 These are not Phase 1 concerns but the architecture must not block them:
 
-- Multiple Kiro custom agents (repo-analyst, backend-engineer, frontend-engineer, test-engineer, pr-writer) — worker routes to the right agent; Henry does not care
+- Multiple Kiro custom agents (repo-analyst, backend-engineer, frontend-engineer, test-engineer, pr-writer) — worker routes to the right agent; the Project Manager does not care
 - Kiro subagents for parallel work — worker spawns multiple Kiro invocations; output contract handles multi-agent results
 - MCP for external tool integration — added to custom agent config when justified
 - Kiro hooks for lifecycle automation — added to workspace when justified
@@ -416,4 +416,4 @@ These are not Phase 1 concerns but the architecture must not block them:
 - PR workflow — worker adds branch/commit/PR state to runs; new endpoints for push/PR
 - Permissions hardening — worker adds safe-root enforcement, action allowlist per project
 
-None of these require changes to the Henry/worker boundary or the output contract.
+None of these require changes to the Project Manager/worker boundary or the output contract.

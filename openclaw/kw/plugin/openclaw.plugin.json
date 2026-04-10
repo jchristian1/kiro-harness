@@ -1,0 +1,28 @@
+{
+  "id": "kw-worker-tools",
+  "name": "KW Worker Tools",
+  "description": "Deterministic kiro-worker tool operations for the Project Lead layer. Exposes 6 callable tools for local folder analysis, GitHub analysis, new project analysis, task status, approve+implement, and implement.",
+  "version": "1.0.0",
+  "contracts": {
+    "tools": [
+      "kw_local_folder_analyze",
+      "kw_github_analyze",
+      "kw_new_project_analyze",
+      "kw_task_status",
+      "kw_approve_implement",
+      "kw_implement",
+      "kw_complete_task",
+      "kw_cancel_task"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "workerUrl": {
+        "type": "string",
+        "description": "kiro-worker base URL"
+      }
+    }
+  }
+}

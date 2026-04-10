@@ -65,11 +65,13 @@ This document defines the complete HTTP API contract for kiro-worker: all 11 end
 | 4 | GET | `/tasks/{id}` | Get task status and last run summary |
 | 5 | POST | `/tasks/{id}/approve` | Approve task (approval gate) |
 | 6 | GET | `/projects/{id}/active-task` | Get the active task for a project |
-| 7 | POST | `/tasks/{id}/runs` | Trigger a run (analyze / implement / validate) |
+| 7 | POST | `/tasks/{id}/runs` | Trigger a run — blocking (waits for completion) |
+| 7b | POST | `/tasks/{id}/runs/start` | Start a run — non-blocking (returns immediately) |
 | 8 | GET | `/tasks/{id}/runs` | List all runs for a task |
 | 9 | GET | `/runs/{id}` | Get run details |
 | 10 | GET | `/runs/{id}/artifact` | Get the artifact for a completed run |
 | 11 | POST | `/tasks/{id}/revise` | Submit revision instructions |
+| 12 | POST | `/tasks/{id}/close` | Close task (validating/awaiting_revision/failed → done) |
 
 ---
 
@@ -238,7 +240,9 @@ This document defines the complete HTTP API contract for kiro-worker: all 11 end
     "status": "completed",
     "started_at": "2025-07-14T09:10:00Z",
     "completed_at": "2025-07-14T09:47:00Z",
-    "failure_reason": null
+    "failure_reason": null,
+    "progress_message": null,
+    "last_activity_at": "2025-07-14T09:47:00Z"
   }
 }
 ```
@@ -255,7 +259,7 @@ This document defines the complete HTTP API contract for kiro-worker: all 11 end
 
 **Purpose:** Reserved for explicit action-level blockers inside a run. Only valid when a task is in `awaiting_approval` due to a specialist being blocked on a risky or permissioned action.
 
-**This is NOT the normal post-analysis continuation path.** After a completed analysis task (`done`), the Project Lead / Project Manager creates a NEW task with `operation: implement_now` to start implementation. See the `henry_implement` tool.
+**This is NOT the normal post-analysis continuation path.** After a completed analysis task (`done`), the Project Manager creates a NEW task with `operation: implement_now` to start implementation. See the `kw_implement` tool.
 
 **State transition:** T6: `awaiting_approval → implementing`
 
@@ -331,7 +335,7 @@ None required.
 
 ## 6. GET /projects/{id}/active-task
 
-**Purpose:** Get the active (non-terminal) task for a project. Used by Henry for resume flows and status checks.
+**Purpose:** Get the active (non-terminal) task for a project. Used by the Project Manager for resume flows and status checks.
 
 **State transition:** None. Read-only.
 
@@ -358,7 +362,9 @@ Same shape as `GET /tasks/{id}`.
     "status": "completed",
     "started_at": "2025-07-14T09:10:00Z",
     "completed_at": "2025-07-14T09:47:00Z",
-    "failure_reason": null
+    "failure_reason": null,
+    "progress_message": null,
+    "last_activity_at": "2025-07-14T09:47:00Z"
   }
 }
 ```
@@ -374,7 +380,9 @@ Same shape as `GET /tasks/{id}`.
 
 ## 7. POST /tasks/{id}/runs
 
-**Purpose:** Trigger a Kiro CLI run. Drives the primary execution loop and handles retries from `failed`.
+**Purpose:** Trigger a Kiro CLI run. **Blocking** — waits for the run to complete before returning. Drives the primary execution loop and handles retries from `failed`.
+
+For non-blocking execution (recommended for long-running tasks), use `POST /tasks/{id}/runs/start` instead.
 
 **State transitions triggered:**
 - T1: `created → opening` (when mode=analyze and task is `created`)
@@ -436,6 +444,42 @@ Same shape as `GET /tasks/{id}`.
   }
 }
 ```
+
+---
+
+## 7b. POST /tasks/{id}/runs/start
+
+**Purpose:** Start a Kiro CLI run **non-blocking** — returns immediately with `task_id`, `run_id`, and `run_status=running`. The run executes in the background. Use `GET /tasks/{id}` to poll progress via `last_run.progress_message` and `last_run.last_activity_at`.
+
+This is the preferred endpoint for all run-starting operations. The old `POST /tasks/{id}/runs` remains for backward compatibility but blocks until the run completes.
+
+**State transitions triggered:** Same as `POST /tasks/{id}/runs` — transitions happen synchronously before the response is returned, so the caller immediately sees the task in the correct in-progress state.
+
+**HTTP status:** 202 Accepted
+
+### Request Body
+
+Same as `POST /tasks/{id}/runs`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `mode` | string | Yes | One of: `analyze`, `implement`, `validate` |
+
+### Response — 202 Accepted
+
+```json
+{
+  "task_id": "task_01HZ3KA2XQM2N4P7R9T6W0YBCF",
+  "run_id": "run_01HZ3KB5XQM2N4P7R9T6W0YBCG",
+  "task_status": "analyzing",
+  "run_status": "running",
+  "message": "Analysis started. Use kw_task_status to check progress."
+}
+```
+
+### Errors
+
+Same as `POST /tasks/{id}/runs`.
 
 ---
 
@@ -654,6 +698,52 @@ Note: `context_snapshot` and `raw_output` are excluded from list responses. Use 
 
 ---
 
+## 12. POST /tasks/{id}/close
+
+**Purpose:** Close a task that is in `validating`, `awaiting_revision`, or `failed` state directly to `done`. Used by the Project Manager when validation is not needed, not possible, or when a failed task should be marked complete after review.
+
+**State transitions triggered:**
+- T15: `validating → done`
+- T16: `awaiting_revision → done`
+- T17: `failed → done`
+
+### Request Body
+
+None required.
+
+### Preconditions
+
+1. Task must exist.
+2. Task must be in `validating`, `awaiting_revision`, or `failed`. Otherwise: 409 `INVALID_STATE_TRANSITION`.
+
+### Response — 200 OK
+
+```json
+{
+  "id": "task_01HZ3KA2XQM2N4P7R9T6W0YBCF",
+  "project_id": "proj_01HZ3K8VXQM2N4P7R9T6W0YBCD",
+  "workspace_id": "ws_01HZ3K9FXQM2N4P7R9T6W0YBCE",
+  "intent": "add_feature",
+  "source": "github_repo",
+  "operation": "implement_now",
+  "description": "Add JWT-based authentication to the storefront API.",
+  "status": "done",
+  "approved_at": null,
+  "created_at": "2025-07-14T09:05:00Z",
+  "updated_at": "2025-07-14T12:00:00Z",
+  "last_run": null
+}
+```
+
+### Errors
+
+| Status | Code | When |
+|---|---|---|
+| 404 | `NOT_FOUND` | Task does not exist |
+| 409 | `INVALID_STATE_TRANSITION` | Task not in `validating`, `awaiting_revision`, or `failed` |
+
+---
+
 ## State Transition Cross-Reference
 
 | Endpoint | Transitions Triggered | Rejection Behavior |
@@ -665,7 +755,9 @@ Note: `context_snapshot` and `raw_output` are excluded from list responses. Use 
 | `POST /tasks/{id}/approve` | T6: `awaiting_approval → implementing` | 409 `INVALID_STATE_FOR_APPROVAL` if wrong state |
 | `GET /projects/{id}/active-task` | None | 404 `NO_ACTIVE_TASK` if none |
 | `POST /tasks/{id}/runs` | T1: `created → opening`; retry from `failed` | 409 `APPROVAL_REQUIRED` if in `awaiting_approval` |
+| `POST /tasks/{id}/runs/start` | T1: `created → opening`; retry from `failed` (non-blocking) | 409 `APPROVAL_REQUIRED` if in `awaiting_approval` |
 | `GET /tasks/{id}/runs` | None | — |
 | `GET /runs/{id}` | None | — |
 | `GET /runs/{id}/artifact` | None | 404 `ARTIFACT_NOT_FOUND` if no artifact |
 | `POST /tasks/{id}/revise` | T13: `awaiting_revision → implementing` | 409 `INVALID_STATE_TRANSITION` if wrong state |
+| `POST /tasks/{id}/close` | T15/T16/T17: `validating\|awaiting_revision\|failed → done` | 409 `INVALID_STATE_TRANSITION` if wrong state |

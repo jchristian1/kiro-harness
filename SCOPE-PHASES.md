@@ -1,127 +1,106 @@
-Phase 0
+# Scope and Phases
 
-Lock the contracts and explicitly decide what belongs to Kiro vs worker. This now includes the new kiro-native-capabilities.md document so you do not accidentally rebuild agent config, persistent standards, or code intelligence. Kiro’s docs make clear these are already first-class product features.
+## Current status
 
-Phase 1
+**Phases 0–4 are complete and validated end-to-end.**
 
-Build kiro-worker core, but only for the parts Kiro does not already own:
+The system is running in production with:
+- kiro-worker (Python/FastAPI) as source of truth
+- kiro-cli as the specialist execution layer
+- OpenClaw (kw-worker-tools plugin) as the Project Manager integration layer
+- Telegram as the primary user interface
+- 8 deterministic kw skills for all operations
+- Non-blocking run model — all run-starting skills return immediately
 
-project/task/run/artifact registry
-workspace lifecycle
-approval state machine
-audit storage
-worker API
-Kiro invocation adapter
+---
 
-Do not build custom repo indexing, custom long-term standards memory, or ad hoc role simulation. Kiro already gives you code intelligence, steering, and custom-agent config for those areas.
+## Phase 0 — Contracts ✓
 
-Phase 2
+Lock the contracts and explicitly decide what belongs to Kiro vs worker. Includes `kiro-native-capabilities.md` so we do not accidentally rebuild agent config, persistent standards, or code intelligence.
 
-Create one real Kiro custom agent, repo-engineer, plus the repo-level context scaffolding:
+## Phase 1 — Worker core ✓
 
-.kiro/agents/repo-engineer.json
-.kiro/steering/*.md
-AGENTS.md
-one or two small Kiro skills where reusable workflows make sense
+Build kiro-worker core:
+- project/task/run/artifact registry
+- workspace lifecycle
+- task state machine (9 states)
+- worker API (14 endpoints)
+- kiro-cli invocation adapter with streaming stdout
 
-This phase is earlier and more important than before, because Kiro custom agents and resources are the right place for execution-role behavior and persistent context. Also remember: if you want steering inside custom agents, you must include it in resources.
+## Phase 2 — Kiro custom agent ✓
 
-Phase 3
+- `kiro-agent-config/repo-engineer.json` — custom agent config
+- `kiro-agent-config/AGENTS.md.template` — workspace context template
+- Structured JSON output contract for analyze/implement/validate
 
-Connect worker → Kiro properly:
+## Phase 3 — Worker → Kiro integration ✓
 
-invoke the custom agent
-pass structured prompts
-parse structured JSON result blocks
-preserve raw logs and normalized summaries
-optionally add only minimal hooks if they clearly reduce glue code
+- kiro-cli invoked as subprocess with `--no-interactive --trust-all-tools`
+- Streaming stdout with progress updates written to DB
+- JSON extraction from ANSI-stripped output
+- Schema validation for all three output modes
 
-Hooks can receive JSON via stdin and can block or warn on tool execution, so they may help later with validation or policy enforcement, but I would keep them light in the first pass.
+## Phase 4 — Project Manager integration ✓
 
-Phase 4
+- OpenClaw plugin (`kw-worker-tools`) with 7 registered tools
+- 8 SKILL.md files for Telegram slash commands
+- Non-blocking run model via `/tasks/{id}/runs/start`
+- Progress polling via `kw_task_status`
+- PM-style completion presentation via `kw_watch_task`
+- Task lifecycle management via `kw_complete_task`
 
-Connect Henry to the worker:
+**Key architectural decisions made:**
+- One task = one bounded specialist run
+- Completed analysis tasks end as `done` — Project Manager creates next task
+- `awaiting_approval` reserved for action-level blockers only
+- `kw` namespace is agent-agnostic (not tied to Henry)
 
-classify request into Intent / Source / Operation Mode
-ask only blocking clarifications
-call worker cleanly
-present result like a tech lead
-request approval when required
+---
 
-Henry stays thin because the worker is still the source of truth, and Kiro remains the engineering layer.
+## Phase 5 — Continuity and resume maturity
 
-Phase 5
+- active-task lookup
+- project aliases
+- resume unfinished tasks
+- stable workspace reuse
+- last run summaries/artifacts
 
-Add continuity and resume maturity:
+## Phase 6 — Reusable workflow packaging
 
-active-task lookup
-project aliases
-resume unfinished tasks
-stable workspace reuse
-last run summaries/artifacts
+- Project Manager skill for routing and policy
+- targeted Kiro skills for repeated engineering workflows
 
-Kiro does have per-directory session persistence and resume, but that is not enough for your delivery system because it does not replace explicit project/task/run state in your worker.
+## Phase 7 — Specialization
 
-Phase 6
+- extra Kiro custom agents (deployment, QA, security, ops)
+- possibly Kiro subagents for delegated or parallel work
 
-Add reusable workflow packaging:
+## Phase 8 — Extension points
 
-Henry skill for routing and policy
-targeted Kiro skills for repeated engineering workflows
+- MCP for external services/tools
+- hooks where automation at lifecycle/tool boundaries is clearly valuable
 
-This is now later than “basic Henry integration” but earlier than advanced specialization, because Kiro skills are a cleaner reuse mechanism than giant prompts.
+## Phase 9 — Professional delivery workflow
 
-Phase 7
+- branch/commit conventions
+- PR preparation
+- push/PR approvals
+- richer validation/reporting
+- stronger permissions and safety controls
 
-Add specialization:
+## Phase 10 — Experimental features
 
-extra Kiro custom agents
-possibly Kiro subagents for delegated or parallel work
+Only evaluate experimental Kiro features after the core system is working.
 
-Since Kiro already supports subagents with separate context, parallel execution, and result aggregation, you should not hand-build elaborate multi-role orchestration before you’ve proven a single-role flow works.
+---
 
-Phase 8
+## Architecture model
 
-Add extension points carefully:
+```
+Telegram → Project Manager (OpenClaw agent) → kw-worker-tools plugin → kiro-worker → kiro-cli
+```
 
-MCP if external services/tools are truly needed
-hooks where automation at lifecycle/tool boundaries is clearly valuable
-
-MCP is the official way to connect specialized servers, APIs, and domain-specific tools, so prefer that over inventing your own side-channel integration pattern when external tools are needed.
-
-Phase 9
-
-Add professional delivery workflow:
-
-branch/commit conventions
-PR preparation
-push/PR approvals
-richer validation/reporting
-stronger permissions and safety controls
-Phase 10
-
-Only evaluate experimental Kiro features after the core system is working
-Kiro’s experimental knowledge management offers persistent semantic retrieval across sessions, but it is explicitly experimental, so I would not make it foundational to v1.
-
-The practical difference in the roadmap
-
-The old version was:
-
-worker
-Henry
-skill
-more roles
-
-The new version is:
-
-contracts
-worker core
-one real Kiro custom agent + steering/resources
-worker/Kiro integration
-Henry integration
-continuity
-skills
-more agents/subagents
-MCP/hooks where justified
-
-That is safer and cheaper, because it uses Kiro for what Kiro is already built to do.
+- **Project Manager** = user-facing orchestration layer (currently Henry, but agent-agnostic)
+- **kiro-worker** = source of truth for all state
+- **Kiro** = bounded specialist execution layer
+- **kw namespace** = current plugin/tool/skill namespace (scalable to future agents)

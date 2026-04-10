@@ -40,6 +40,9 @@ def get_run(run_id: str, db: Session = Depends(get_db)) -> RunResponse:
         failure_reason=run.failure_reason,
         started_at=run.started_at,
         completed_at=run.completed_at,
+        progress_message=run.progress_message,
+        last_activity_at=run.last_activity_at,
+        partial_output=run.partial_output,
     )
 
 

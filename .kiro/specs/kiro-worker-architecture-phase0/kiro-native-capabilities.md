@@ -157,10 +157,12 @@ Reusable, portable workflow instruction packages. A skill defines a sequence of 
 - Ad-hoc prompt strings constructed in the worker adapter for each operation type
 - Duplicated workflow instructions across multiple worker code paths
 - Non-version-controlled prompt logic embedded in application code
+- The `command-dispatch: tool` pattern in Project Manager skills allows clean invocation of `kw-worker-tools` plugin tools without ad-hoc HTTP client code
 
 **What we still build:**
 - The worker adapter still selects which skill to invoke based on the task operation (analyze → `analysis-workflow`, implement → `implementation-workflow`, validate → `validation-workflow`)
 - The worker still passes task-specific context alongside the skill invocation
+- Project Manager skills use the `command-dispatch: tool` pattern to invoke `kw-worker-tools` plugin tools
 
 **Phase 1 skill definitions (summary):**
 
@@ -247,7 +249,7 @@ The ability to spawn specialized sub-agents for parallel or delegated work withi
 - Monolithic agent doing analysis + implementation + validation in one pass
 
 **Phase 9 plan:**
-Worker routes to the appropriate custom agent based on task type. Subagents handle specialized subtasks. Output contract is extended to handle multi-agent results. Henry does not need to know which agents were used.
+Worker routes to the appropriate custom agent based on task type. Subagents handle specialized subtasks. Output contract is extended to handle multi-agent results. The Project Manager does not need to know which agents were used.
 
 ---
 
@@ -258,16 +260,32 @@ MCP integration for connecting external tools and services to Kiro agents. Confi
 
 | Field | Decision | Reason |
 |---|---|---|
-| Use in v1 | **No** | No external tool integration needed in Phase 1 |
-| Use later | **Yes — Phase 5+** | When external services (GitHub API, issue trackers, CI systems) need to be integrated |
+| Use in v1 | **Yes — OpenClaw plugin** | The `kw-worker-tools` plugin (id: `kw-worker-tools`) exposes 7 tools to the Project Manager agent using the `kw_` prefix |
+| Use for external services | **Later — Phase 5+** | When external services (GitHub API, issue trackers, CI systems) need to be integrated |
 | Architecture impact | MCP servers would be added to custom agent config when justified |
 
-**What this replaces / avoids (when used):**
-- Custom HTTP client code in the worker for external service calls
-- Custom tool implementations for common integrations
+**OpenClaw plugin (`kw-worker-tools`):**
+
+The Project Manager agent uses the `kw-worker-tools` OpenClaw plugin to call kiro-worker. The plugin exposes 7 tools:
+
+| Tool | Purpose |
+|---|---|
+| `kw_local_folder_analyze` | Analyze a local folder project |
+| `kw_github_analyze` | Analyze a GitHub repo |
+| `kw_new_project_analyze` | Analyze a new project |
+| `kw_task_status` | Get current task status and last run summary |
+| `kw_approve_implement` | Approve analysis and start implementation |
+| `kw_implement` | Start an implementation task directly |
+| `kw_complete_task` | Close a task (validating/awaiting_revision/failed → done) |
+
+Skills in the Project Manager agent use the `command-dispatch: tool` pattern to invoke these tools.
+
+**What this replaces / avoids:**
+- Custom HTTP client code in the Project Manager for worker API calls
+- Ad-hoc tool implementations for common worker operations
 
 **Phase 5+ plan:**
-Add MCP server configs to relevant custom agents. Worker does not need to change; Kiro handles the external tool calls and includes results in structured output.
+Add MCP server configs to relevant custom agents for external service integration (GitHub API, issue trackers, CI). Worker does not need to change; Kiro handles the external tool calls and includes results in structured output.
 
 ---
 
@@ -312,7 +330,7 @@ Experimental features for knowledge graph construction, codebase indexing, and s
 | Code intelligence (tree-sitter) | **Rely on** | 1 | Custom code-intelligence layer |
 | Session persistence | **Do not depend on** | Never | Worker DB is authoritative |
 | Subagents | **Use later** | 9 | Sequential single-agent execution |
-| MCP | **Use later** | 5+ | Custom HTTP client for external services |
+| MCP | **Use — OpenClaw plugin** | 1 | Project Manager uses `kw-worker-tools` plugin (7 tools, `kw_` prefix) to call worker; external service MCP deferred to Phase 5+ |
 | Hooks | **Use later** | 7 | Manual pre/post processing in worker |
 | Experimental knowledge | **Evaluate later** | 6+ | Custom codebase indexing |
 
@@ -329,7 +347,8 @@ This is the definitive list of what the worker and surrounding system must build
 | Approval enforcement | kiro-worker | Kiro executes; it does not gate on external approval |
 | Workspace manager (4 source modes) | kiro-worker | Kiro operates within a workspace; it does not manage workspace creation |
 | Kiro CLI adapter (subprocess + parse) | kiro-worker | Worker must invoke Kiro and handle its output |
-| Worker HTTP API | kiro-worker | Henry needs a stable API to call; Kiro does not provide this |
+| Worker HTTP API | kiro-worker | The Project Manager needs a stable API to call; Kiro does not provide this |
 | Audit log | kiro-worker | Every state transition and invocation must be recorded |
-| Henry skill (routing + workflow policy) | Henry / OpenClaw | Kiro does not handle user-facing orchestration |
+| Project Manager skills (routing + workflow policy) | Project Manager / OpenClaw agent | Kiro does not handle user-facing orchestration |
+| Project Manager tools (kw-worker-tools plugin) | OpenClaw plugin (`kw-worker-tools`) | 7 tools with `kw_` prefix; skills use `command-dispatch: tool` pattern |
 | Resume context reconstruction | kiro-worker | Worker reconstructs context from DB; does not rely on Kiro session |

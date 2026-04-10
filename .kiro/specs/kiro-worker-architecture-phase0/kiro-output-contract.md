@@ -53,8 +53,8 @@ Stored as: artifact type `analysis`
 
 | Value | Meaning | Worker behavior |
 |---|---|---|
-| `approve_and_implement` | Analysis is complete; implementation is ready to proceed pending approval | Worker transitions task to `awaiting_approval` |
-| `request_clarification` | Kiro has questions that must be answered before implementation can proceed | Worker transitions task to `awaiting_approval`; Henry surfaces the `questions` array to the user |
+| `approve_and_implement` | Analysis is complete; implementation is ready to proceed | Worker transitions task to `done`. The Project Manager reads the artifact and creates a new `implement_now` task when the user approves. |
+| `request_clarification` | Kiro has questions that must be answered before implementation can proceed | Worker transitions task to `awaiting_revision`; Project Manager surfaces the `questions` array to the user |
 | `no_action_needed` | Analysis found nothing to implement (e.g., feature already exists) | Worker transitions task to `done` |
 
 ### JSON Example
@@ -119,7 +119,7 @@ Stored as: artifact type `implementation`
 | `mode` | string | Yes | `"implement"` | Must be exactly `"implement"`. |
 | `headline` | string | Yes | Free text, ≤ 200 chars | One-sentence summary of what was implemented. |
 | `files_changed` | array of FileChange | Yes | Non-empty array | List of files created, modified, or deleted. See FileChange schema below. |
-| `changes_summary` | string | Yes | Free text | Human-readable prose summary of all changes made. Used by Henry to communicate results to the user. |
+| `changes_summary` | string | Yes | Free text | Human-readable prose summary of all changes made. Used by the Project Manager to communicate results to the user. |
 | `validation_run` | ValidationRun or null | Yes | Object or null | Result of any validation commands Kiro ran inline during implementation. Null if no validation was run. |
 | `known_issues` | array of string | Yes | May be empty array | Issues Kiro was unable to resolve during implementation. Empty array if none. |
 | `follow_ups` | array of string | Yes | May be empty array | Recommended follow-up actions for the user or next run (e.g., "add integration tests for the login route"). |
@@ -322,16 +322,17 @@ The worker uses `passed` as the primary signal for the T10/T11 transition decisi
 
 ### Overview
 
-The worker processes Kiro CLI stdout in two stages:
+The worker processes Kiro CLI stdout in three stages:
 
-1. **JSON parse** — attempt to parse stdout as JSON
-2. **Schema validation** — validate the parsed object against the schema for the run mode
+1. **ANSI stripping** — remove ANSI escape sequences from raw stdout before any parsing
+2. **JSON extraction** — locate the output contract JSON using `"schema_version"` as an anchor marker: scan backward from the last occurrence to find the opening `{`, then scan forward with brace counting to find the matching closing `}`. This handles the common case where Kiro emits tool call logs and code diffs before the final JSON.
+3. **Schema validation** — validate the parsed object against the schema for the run mode
 
-If either stage fails, the run is marked failed and the task transitions to `failed`. No artifact is created for a failed run.
+If any stage fails, the run is marked failed and the task transitions to `failed`. No artifact is created for a failed run.
 
 ### Stage 1: Non-JSON Output
 
-**Trigger:** Kiro CLI stdout cannot be parsed as JSON (e.g., prose output, partial JSON, HTML error page, empty string).
+**Trigger:** After ANSI stripping, no `"schema_version"` marker is found in stdout, or the JSON object surrounding it cannot be extracted, or the extracted candidate fails `json.loads()`.
 
 **Worker actions:**
 1. Set `runs.status = 'parse_failed'`

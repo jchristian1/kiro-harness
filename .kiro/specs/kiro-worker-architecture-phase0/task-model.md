@@ -307,6 +307,9 @@ A Run is a single Kiro CLI invocation. Each task may have multiple runs (one per
 | `raw_output` | TEXT | No | Raw stdout from the Kiro CLI subprocess. Null until run completes. |
 | `parse_status` | TEXT | No | `ok`, `parse_failed`, or `schema_invalid`. Null until run completes. |
 | `failure_reason` | TEXT | No | Human-readable failure description. Null unless `status` is `error` or `parse_status` is not `ok`. |
+| `progress_message` | TEXT | No | Latest human-readable progress message extracted from streaming stdout. Updated during execution. Null until first progress line is received. |
+| `last_activity_at` | TEXT (ISO 8601) | No | UTC timestamp of the last progress update. Updated whenever `progress_message` is written. Null until first progress line. |
+| `partial_output` | TEXT | No | Last ~2000 chars of stdout captured so far. Updated during streaming execution. Null until output starts arriving. |
 | `started_at` | TEXT (ISO 8601) | Yes | UTC timestamp when the subprocess was launched. |
 | `completed_at` | TEXT (ISO 8601) | No | UTC timestamp when the subprocess exited. Null while running. |
 
@@ -354,12 +357,17 @@ CREATE TABLE runs (
   raw_output        TEXT,
   parse_status      TEXT CHECK (parse_status IN ('ok', 'parse_failed', 'schema_invalid')),
   failure_reason    TEXT,
+  progress_message  TEXT,
+  last_activity_at  TEXT,
+  partial_output    TEXT,
   started_at        TEXT NOT NULL,
   completed_at      TEXT
 );
 
 CREATE INDEX idx_runs_task_id ON runs(task_id);
 ```
+
+**Progress fields note:** `progress_message`, `last_activity_at`, and `partial_output` are written during streaming kiro-cli execution via the `on_progress` callback. They allow `GET /tasks/{id}` to return live progress while a run is in flight. WAL mode (`PRAGMA journal_mode = WAL`) is required so these writes are visible to concurrent readers without blocking the writer.
 
 ---
 
@@ -555,6 +563,9 @@ CREATE TABLE runs (
   raw_output        TEXT,
   parse_status      TEXT CHECK (parse_status IN ('ok', 'parse_failed', 'schema_invalid')),
   failure_reason    TEXT,
+  progress_message  TEXT,
+  last_activity_at  TEXT,
+  partial_output    TEXT,
   started_at        TEXT NOT NULL,
   completed_at      TEXT
 );
@@ -577,4 +588,9 @@ CREATE TABLE artifacts (
 CREATE INDEX idx_artifacts_task_id ON artifacts(task_id);
 ```
 
-**SQLite foreign key enforcement note:** SQLite does not enforce foreign keys by default. Phase 1 implementation must execute `PRAGMA foreign_keys = ON;` on every connection before any query.
+**SQLite connection pragmas:** Phase 1 implementation must execute the following on every SQLite connection before any query:
+```sql
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+```
+`foreign_keys = ON` enforces referential integrity (SQLite does not enforce FKs by default). `journal_mode = WAL` enables concurrent readers and writers — essential for progress updates written during a long run to be visible to concurrent `GET /tasks/{id}` requests.

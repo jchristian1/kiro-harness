@@ -48,6 +48,7 @@ class RunStatus(str, Enum):
     completed = "completed"
     parse_failed = "parse_failed"
     error = "error"
+    cancelled = "cancelled"
 
 
 class ArtifactType(str, Enum):

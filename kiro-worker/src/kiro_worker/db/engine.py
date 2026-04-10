@@ -12,10 +12,14 @@ engine = create_engine(
 
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
-    """Enable foreign key enforcement on every SQLite connection."""
+    """Enable foreign key enforcement and WAL mode on every SQLite connection.
+    WAL mode allows concurrent readers and writers — essential for progress
+    updates written during a long run to be visible to concurrent GET requests.
+    """
     if "sqlite" in settings.DATABASE_URL:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute("PRAGMA journal_mode = WAL")
         cursor.close()
 
 

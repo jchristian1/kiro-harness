@@ -117,6 +117,20 @@ def update_progress(
     return run
 
 
+def cancel_run(
+    db: Session,
+    run: Run,
+    reason: str | None = None,
+) -> Run:
+    """Mark a run as cancelled. Called when the Project Manager cancels an active task."""
+    run.status = "cancelled"
+    run.failure_reason = reason or "Cancelled by Project Manager"
+    run.completed_at = _now()
+    db.commit()
+    db.refresh(run)
+    return run
+
+
 def get_run(db: Session, run_id: str) -> Run | None:
     return db.query(Run).filter(Run.id == run_id).first()
 

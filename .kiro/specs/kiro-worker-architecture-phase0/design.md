@@ -4,7 +4,7 @@
 
 This is the Phase 0 architecture contract freeze for the scalable software-delivery orchestration system. Nothing in this document is implementation — it is the set of contracts, boundaries, and decisions that must not move once Phase 1 begins.
 
-The system is a multi-layer delivery pipeline: Telegram is the UI, Henry (OpenClaw agent) is the PM/tech-lead/orchestrator, kiro-worker is the backend system of record, and Kiro CLI is the engineering execution layer. The workspace and registry provide continuity and memory across sessions.
+The system is a multi-layer delivery pipeline: Telegram is the UI, the Project Manager (currently an OpenClaw agent) is the orchestrator, kiro-worker is the backend system of record, and Kiro CLI is the engineering execution layer.
 
 **Critical design principle:** Kiro already provides significant native capabilities (custom agents, steering, skills, code intelligence, session persistence, MCP, hooks, subagents). The architecture must use these intentionally and must not rebuild what Kiro already gives us.
 
@@ -24,8 +24,8 @@ The six documents in this pack define the full contract surface for Phase 1 impl
 ```mermaid
 graph TD
     TG[Telegram UI]
-    H[Henry - OpenClaw Agent]
-    HS[Henry Skill\nrouting + workflow policy]
+    H[Project Manager\nOpenClaw Agent]
+    HS[Project Manager Skills\nrouting + workflow policy]
     KW[kiro-worker\nsystem of record]
     KC[Kiro CLI\nengineering execution]
     CA[Kiro Custom Agents\nrole-specific config + tools]
@@ -47,7 +47,7 @@ graph TD
     KW <-->|read/write| WR
 ```
 
-Henry is thin by design. He classifies intent, calls the worker, and communicates results. He does not own state, execution logic, or repo knowledge. The worker owns all of that.
+The Project Manager is thin by design. It classifies intent, calls the worker, and communicates results. It does not own state, execution logic, or repo knowledge. The worker owns all of that.
 
 Kiro CLI is the engineering execution layer. Custom agents define role-specific tool permissions, model selection, and resource access. Steering and AGENTS.md carry persistent engineering standards so we do not re-explain them on every invocation. Skills carry reusable workflow instructions.
 
@@ -58,8 +58,8 @@ Kiro CLI is the engineering execution layer. Custom agents define role-specific 
 | Layer | Component | Role |
 |---|---|---|
 | UI | Telegram | User-facing interface only. No business logic. |
-| Orchestrator | Henry (OpenClaw agent) | PM / tech lead. Classifies, calls worker, communicates. Thin by design. |
-| Routing rules | Henry skill | Routing logic, clarification policy, approval rules, summary formatting. |
+| Orchestrator | Project Manager (OpenClaw agent) | PM / tech lead. Classifies, calls worker, communicates. Thin by design. |
+| Routing rules | Project Manager skills | Routing logic, clarification policy, approval rules, summary formatting. |
 | System of record | kiro-worker | Backend. Owns all project/task/run/artifact state. Calls Kiro CLI. Enforces approval policy. |
 | Engineering execution | Kiro CLI | Executes analysis, implementation, validation via custom agents. |
 | Role configuration | Kiro custom agents | Per-role tool permissions, model, resources, prompt. Replaces prompt-only role system. |
@@ -76,9 +76,9 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
 **We build:**
 - kiro-worker: persistent state, task lifecycle, approval enforcement, audit log
 - Workspace manager: four source modes, path safety, git operations
-- Worker API: the 11 HTTP endpoints Henry calls
-- Kiro invocation adapter: CLI subprocess, stdout capture, JSON parse, failure handling
-- Henry skill: routing rules, clarification policy, summary formatting
+- Worker API: the HTTP endpoints the Project Manager calls
+- Kiro invocation adapter: CLI subprocess, stdout capture, JSON extraction (schema_version anchor + brace counting), failure handling
+- Project Manager skills: routing rules, clarification policy, summary formatting
 
 **Kiro provides (use immediately):**
 - Custom agents for each engineering role (repo-engineer in Phase 1)
@@ -103,10 +103,10 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
 
 ### What is strong
 
-- Role boundaries are unambiguous: Henry = orchestrator, worker = backbone, Kiro CLI = executor
+- Role boundaries are unambiguous: Project Manager = orchestrator, worker = backbone, Kiro CLI = executor
 - Custom agents replace prompt-only roles — role config is explicit and version-controlled
 - `AGENTS.md` is always included automatically; `.kiro/steering/` is loaded only when explicitly declared in the agent's `resources` — engineering standards are consistently available without re-explaining them on every invocation
-- The Intent/Source/Operation model gives Henry a clean classification surface
+- The Intent/Source/Operation model gives the Project Manager a clean classification surface
 - The state machine covers the full delivery loop including approval, revision, and resume
 - The output contract forces Kiro to be machine-readable from day one
 - The API surface is minimal and maps directly to real user actions
@@ -115,8 +115,7 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
 ### What is ambiguous
 
 - Workspace path resolution for `local_folder` (non-git) sources needs a concrete convention
-- Approval policy thresholds ("non-trivial") need a working definition before Phase 1 ships
-- How Henry surfaces approval requests in Telegram (inline buttons vs text reply) is not defined here — that is a Henry concern, not a worker concern
+- How the Project Manager surfaces approval requests in Telegram (inline buttons vs text reply) is not defined here — that is a Project Manager concern, not a worker concern
 - Multi-workspace per project is not modeled in v1; assume one active workspace per project
 - Which Kiro model to use per custom agent role is not locked — leave as configurable
 
@@ -131,7 +130,7 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
 | Built-in code intelligence | Yes — rely on it, do not replicate | tree-sitter is already there; no custom code-intelligence layer needed |
 | Session persistence | No — worker handles resume | Worker is system of record; Kiro session history is not authoritative |
 | Subagents | No — single agent in Phase 1 | Add in Phase 9 when multi-role team is needed |
-| MCP | No — not needed in Phase 1 | Add when external tool integration is justified |
+| MCP | Yes — OpenClaw plugin | kw-worker-tools plugin (7 tools, kw_ prefix) used by Project Manager; external service MCP deferred to Phase 5+ |
 | Hooks | No — not needed in Phase 1 | Add in Phase 7 for lifecycle automation |
 
 ### What to build first (Phase 1 order)
@@ -142,18 +141,18 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
 4. Kiro custom agent definition (`repo-engineer`)
 5. `.kiro/steering/` + `AGENTS.md` with engineering standards
 6. Kiro skills for analysis and implementation workflows
-7. Kiro adapter (CLI invocation → stdout → JSON parse → store)
-8. Worker API endpoints (the 11 routes in worker-api.md)
+7. Kiro adapter (CLI invocation → stdout → ANSI strip → JSON extraction → schema validation → store)
+8. Worker API endpoints (the routes in worker-api.md, including /runs/start and /close)
 
 ### What NOT to build yet
 
-- Henry skill formalization (Phase 4)
+- Project Manager skill formalization (Phase 4)
 - Multi-role Kiro team (Phase 9)
 - Branch/commit/PR workflow (Phase 10)
 - Permission hardening beyond basic safe-root checks (Phase 11)
 - Project aliases and registry search (Phase 8)
 - Planning/spec layer (Phase 6)
-- MCP integrations (Phase 5+)
+- External service MCP integrations (Phase 5+)
 - Kiro hooks (Phase 7+)
 - Kiro subagents (Phase 9+)
 
@@ -173,25 +172,33 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
     "kiro-native-capabilities.md"
   ],
   "key_decisions": [
-    "Henry is thin: classify + call + communicate only; no state ownership",
+    "Project Manager is thin: classify + call + communicate only; no state ownership",
     "kiro-worker is the single system of record for all project/task/run state; NOT Kiro session history",
-    "Kiro CLI is the engineering execution layer; custom agents define role-specific config",
+    "Kiro CLI is the engineering execution layer; invoked as: kiro-cli chat --no-interactive --trust-all-tools <prompt>",
+    "kiro-cli is a separate binary from the Kiro IDE launcher; installed independently",
     "Kiro custom agents replace prompt-only roles — tool permissions, model, resources are explicit",
     ".kiro/steering/ + AGENTS.md carry persistent engineering standards; do not re-explain on every invocation",
     "Kiro skills carry reusable workflow instructions; use for analysis and implementation workflows",
     "Do not build a custom code-intelligence layer in v1 — rely on Kiro's built-in tree-sitter",
     "Kiro agents must always return structured JSON; prose-only output is a parse failure",
-    "Approval is required before any non-trivial implementation, destructive action, or push/PR",
-    "Intent/Source/Operation is the canonical classification model for all Henry requests",
+    "JSON extraction uses schema_version as anchor marker; scans backward/forward with brace counting; strips ANSI codes first",
+    "Completed analyze tasks end as done (not awaiting_approval); Project Manager creates a NEW task for the next bounded run",
+    "awaiting_approval is reserved for explicit action-level blockers only — NOT used as a default post-analysis gate",
+    "POST /tasks/{id}/runs/start is the non-blocking run endpoint; POST /tasks/{id}/runs is blocking (kept for backward compat)",
+    "POST /tasks/{id}/close closes tasks in validating/awaiting_revision/failed to done",
+    "Runs table has progress_message, last_activity_at, partial_output fields written during streaming execution",
+    "SQLite with WAL mode (PRAGMA journal_mode = WAL) — required for concurrent progress reads during long runs",
+    "Intent/Source/Operation is the canonical classification model for all Project Manager requests",
     "Four source modes: new_project, github_repo, local_repo, local_folder",
     "Task state machine has 9 states with explicit allowed transitions",
     "v1 uses SQLite; schema is designed to migrate to Postgres without model changes",
     "One active workspace per project in v1",
-    "Kiro output contract is versioned from day one (schema_version field)"
+    "Kiro output contract is versioned from day one (schema_version field)",
+    "OpenClaw plugin kw-worker-tools (id: kw-worker-tools) exposes 7 tools with kw_ prefix; skills use command-dispatch: tool pattern"
   ],
   "assumptions": [
-    "Henry already exists and can make HTTP calls to the worker",
-    "Kiro CLI can be invoked as a subprocess from the worker",
+    "Project Manager already exists and can make HTTP calls to the worker via kw-worker-tools plugin",
+    "Kiro CLI can be invoked as a subprocess from the worker using: kiro-cli chat --no-interactive --trust-all-tools <prompt>",
     "Kiro custom agents can be defined per workspace in .kiro/agents/",
     "Workspace root is a configurable safe path; worker enforces it",
     "GitHub access uses a pre-configured token; no OAuth flow in Phase 1",
@@ -207,11 +214,11 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
     "Define repo-engineer Kiro custom agent with explicit tool permissions before writing prompts",
     "Add .kiro/steering/ and AGENTS.md with engineering standards before first Kiro invocation",
     "Define analysis and implementation Kiro skills before building the adapter",
-    "Build Kiro adapter with CLI subprocess, stdout capture, and JSON parse",
-    "Expose the 11 API endpoints and test the full loop manually before connecting Henry"
+    "Build Kiro adapter with CLI subprocess, stdout capture, ANSI stripping, schema_version-anchored JSON extraction",
+    "Expose the API endpoints (including /runs/start and /close) and test the full loop manually before connecting the Project Manager"
   ],
   "not_in_phase_0": [
-    "Henry skill formalization",
+    "Project Manager skill formalization",
     "Multi-role Kiro team",
     "Branch/commit/PR workflow",
     "Permission hardening beyond safe-root enforcement",
@@ -220,7 +227,7 @@ This is the most important design decision in Phase 0. See `kiro-native-capabili
     "Telegram UI specifics",
     "OAuth or GitHub App integration",
     "Multi-workspace per project",
-    "MCP integrations",
+    "External service MCP integrations",
     "Kiro hooks",
     "Kiro subagents"
   ],

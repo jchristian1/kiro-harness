@@ -24,14 +24,14 @@ These are the only valid values for `tasks.status`. No other values are permitte
 | `implementing` | Specialist CLI is running the implementation skill | No | No |
 | `validating` | Specialist CLI is running the validation skill | No | No |
 | `awaiting_revision` | Specialist needs more input (clarification, revision instructions) or validation found issues | No | Yes |
-| `done` | Task complete; all runs stored; artifacts available. Project Lead / Project Manager reads results and decides next action. | Yes | No |
+| `done` | Task complete; all runs stored; artifacts available. Project Manager reads results and decides next action. | Yes | No |
 | `failed` | Terminal failure; see `failure_reason` on the last Run record | Yes | No |
 
 **Terminal states:** `done` and `failed`. No transition out of a terminal state is permitted.
 
 **Resumable states:** `awaiting_approval` and `awaiting_revision`.
 
-**Architecture note:** A task represents one bounded specialist execution unit. When a specialist finishes a run and is not blocked, the task ends as `done`. The Project Lead / Project Manager handles the user-facing conversation and creates a NEW task for the next bounded run (implement, deploy, test, etc.). The `awaiting_approval` state is reserved for explicit action-level blockers inside a run — it is NOT used as a default post-analysis gate.
+**Architecture note:** A task represents one bounded specialist execution unit. When a specialist finishes a run and is not blocked, the task ends as `done`. The Project Manager handles the user-facing conversation and creates a NEW task for the next bounded run (implement, deploy, test, etc.). The `awaiting_approval` state is reserved for explicit action-level blockers inside a run — it is NOT used as a default post-analysis gate.
 
 ---
 
@@ -41,21 +41,27 @@ Every allowed transition is listed here. Any transition not in this table is for
 
 | # | From | To | Trigger | Actor | Approval Gate? | Automatic? |
 |---|---|---|---|---|---|---|
-| T1 | `created` | `opening` | `POST /tasks/{id}/runs` (mode=analyze) or workspace open initiated | Worker (internal) | No | Yes — immediately after task creation when a run is triggered |
-| T2 | `opening` | `analyzing` | Workspace open/clone/validate succeeds | Worker (internal) | No | Yes |
+| T1 | `created` | `opening` | `POST /tasks/{id}/runs` or `POST /tasks/{id}/runs/start` (mode=analyze or mode=implement) | Worker (internal) | No | Yes — immediately after task creation when a run is triggered |
+| T2 | `opening` | `analyzing` | Workspace open/clone/validate succeeds (mode=analyze) | Worker (internal) | No | Yes |
+| T2-variant | `opening` | `implementing` | Workspace open/clone/validate succeeds (mode=implement, implement_now operation) | Worker (internal) | No | Yes |
 | T3 | `opening` | `failed` | Workspace open/clone/validate fails | Worker (internal) | No | Yes |
-| T4 | `analyzing` | `done` | Kiro analysis run completes; `recommended_next_step` is `approve_and_implement` with non-`implement_now` operation, or `no_action_needed` | Worker (internal) | No | Yes — Project Lead creates next task if needed |
+| T4 | `analyzing` | `done` | Kiro analysis run completes; `recommended_next_step` is `approve_and_implement` with non-`implement_now` operation, or `no_action_needed` | Worker (internal) | No | Yes — Project Manager creates next task if needed |
 | T4-variant | `analyzing` | `implementing` | Kiro analysis run completes; operation is `implement_now` | Worker (internal) | No | Yes |
 | T4-variant | `analyzing` | `awaiting_revision` | Kiro analysis run completes; `recommended_next_step` is `request_clarification` | Worker (internal) | No | Yes |
 | T5 | `analyzing` | `failed` | Kiro CLI analysis run fails (non-zero exit, timeout, parse failure, schema invalid) | Worker (internal) | No | Yes |
-| T6 | `awaiting_approval` | `implementing` | `POST /tasks/{id}/approve` received (reserved for explicit action-level blockers) | Project Lead (on behalf of user) | **Yes — action-level gate** | No — requires explicit API call |
-| T8 | `implementing` | `validating` | Kiro CLI implementation run completes successfully; artifact stored | Worker (internal) | No | Yes |
+| T6 | `awaiting_approval` | `implementing` | `POST /tasks/{id}/approve` received (reserved for explicit action-level blockers) | Project Manager (on behalf of user) | **Yes — action-level gate** | No — requires explicit API call |
+| T8 | `implementing` | `validating` | Kiro CLI implementation run completes; `recommended_next_step` is `run_validation` | Worker (internal) | No | Yes |
+| T8-variant | `implementing` | `awaiting_revision` | Kiro CLI implementation run completes; `recommended_next_step` is `request_review` or `needs_follow_up` | Worker (internal) | No | Yes |
+| T8-variant | `implementing` | `done` | Kiro CLI implementation run completes; validation skipped (Project Manager closes) | Worker (internal) | No | Yes |
 | T9 | `implementing` | `failed` | Kiro CLI implementation run fails | Worker (internal) | No | Yes |
 | T10 | `validating` | `done` | Kiro CLI validation run completes with pass status | Worker (internal) | No | Yes |
 | T11 | `validating` | `awaiting_revision` | Kiro CLI validation run completes with fail status (issues found) | Worker (internal) | No | Yes |
 | T12 | `validating` | `failed` | Kiro CLI validation run fails (non-zero exit, timeout, parse failure) | Worker (internal) | No | Yes |
-| T13 | `awaiting_revision` | `implementing` | `POST /tasks/{id}/revise` received with revision instructions | Henry (on behalf of user) | No | No — requires explicit API call |
+| T13 | `awaiting_revision` | `implementing` | `POST /tasks/{id}/revise` received with revision instructions | Project Manager (on behalf of user) | No | No — requires explicit API call |
 | T14 | `awaiting_revision` | `failed` | Worker receives explicit abandon signal (future phase) or operator marks failed | Worker (internal) | No | No |
+| T15 | `validating` | `done` | `POST /tasks/{id}/close` — Project Manager closes without running validation | Project Manager | No | No — requires explicit API call |
+| T16 | `awaiting_revision` | `done` | `POST /tasks/{id}/close` — Project Manager closes after reviewing | Project Manager | No | No — requires explicit API call |
+| T17 | `failed` | `done` | `POST /tasks/{id}/close` — Project Manager closes after reviewing failure | Project Manager | No | No — requires explicit API call |
 
 **Notes on T7:** If `POST /tasks/{id}/runs` is called while the task is in `awaiting_approval`, the worker rejects the request with HTTP 409 and error code `APPROVAL_REQUIRED`. The task does NOT transition to `failed` — it remains in `awaiting_approval`. T7 is listed for completeness but is a rejection, not a state transition.
 
@@ -73,9 +79,9 @@ Only **T6** (`awaiting_approval → implementing`) requires an approval gate. Al
 
 ### Approval gate enforcement rules
 
-1. The worker enforces the approval gate — not Henry, not Kiro CLI.
+1. The worker enforces the approval gate — not the Project Manager, not Kiro CLI.
 2. `POST /tasks/{id}/approve` is the **only** mechanism to transition a task out of `awaiting_approval`. No other endpoint, internal event, or Kiro invocation may bypass this gate.
-3. When a task is in `awaiting_approval`, any call to `POST /tasks/{id}/runs` is rejected with HTTP 409 and error code `APPROVAL_REQUIRED`. The task remains in `awaiting_approval`.
+3. When a task is in `awaiting_approval`, any call to `POST /tasks/{id}/runs` or `POST /tasks/{id}/runs/start` is rejected with HTTP 409 and error code `APPROVAL_REQUIRED`. The task remains in `awaiting_approval`.
 4. On receiving `POST /tasks/{id}/approve`, the worker:
    a. Validates the task is in `awaiting_approval` state. If not, returns HTTP 409 with error code `INVALID_STATE_FOR_APPROVAL`.
    b. Sets `tasks.approved_at` to the current UTC timestamp.
@@ -85,16 +91,18 @@ Only **T6** (`awaiting_approval → implementing`) requires an approval gate. Al
 
 ### What "non-trivial implementation" means
 
-Per `architecture.md`, approval is required before any non-trivial implementation. For the purposes of the state machine, **all** `analyze_then_approve` and `implement_and_prepare_pr` operation mode tasks require approval before implementing. The approval gate is unconditional for these operation modes. For `implement_now` tasks, the worker skips the `awaiting_approval` state entirely and transitions directly from `analyzing` to `implementing` (or from `opening` to `implementing` if no analysis step is configured).
+The `awaiting_approval` state is reserved for explicit action-level blockers inside a run — situations where Kiro encounters a risky or permissioned action mid-execution and cannot proceed without explicit authorization. It is NOT used as a default post-analysis gate.
 
 **Operation mode → approval gate mapping:**
 
 | Operation | Approval gate required? | Notes |
 |---|---|---|
 | `plan_only` | No | Task ends at `analyzing` → `done` (no implementation) |
-| `analyze_then_approve` | Yes | Standard flow; approval gate at `awaiting_approval` |
-| `implement_now` | No | Skips `awaiting_approval`; goes directly to `implementing` |
-| `implement_and_prepare_pr` | Yes | Same gate as `analyze_then_approve`; PR step added after `done` in future phase |
+| `analyze_then_approve` | No — analysis ends as `done` | Project Manager reads artifact and creates a new `implement_now` task when user approves |
+| `implement_now` | No | Skips analysis; goes directly to `implementing` |
+| `implement_and_prepare_pr` | No — analysis ends as `done` | Same as `analyze_then_approve`; PR step added after `done` in future phase |
+
+The `awaiting_approval` state is only entered when Kiro explicitly signals it is blocked on an action-level gate during a run. This is rare and reserved for destructive or permissioned operations.
 
 ---
 
@@ -104,11 +112,11 @@ Per `architecture.md`, approval is required before any non-trivial implementatio
 
 ```
 Analysis task:   created → opening → analyzing → done
-Implementation task (new task, created by Project Lead after user approves):
+Implementation task (new task, created by Project Manager after user approves):
                  created → opening → implementing → validating → done
 ```
 
-The Project Lead reads the analysis artifact from the completed task, presents findings to the user, and creates a new task with `operation: implement_now` when the user approves.
+The Project Manager reads the analysis artifact from the completed task, presents findings to the user, and creates a new task with `operation: implement_now` when the user approves.
 
 ### implement_now
 
@@ -116,7 +124,7 @@ The Project Lead reads the analysis artifact from the completed task, presents f
 created → opening → implementing → validating → done
 ```
 
-No analysis step. Used when the Project Lead creates an implementation task directly.
+No analysis step. Used when the Project Manager creates an implementation task directly.
 
 ### plan_only
 
@@ -142,30 +150,41 @@ The `awaiting_revision → implementing → validating` loop may repeat until va
 stateDiagram-v2
     [*] --> created : POST /tasks (task created)
 
-    created --> opening : POST /tasks/{id}/runs triggers workspace open
-    opening --> analyzing : workspace open succeeds
+    created --> opening : POST /tasks/{id}/runs or /runs/start triggers workspace open
+    opening --> analyzing : workspace open succeeds (mode=analyze)
+    opening --> implementing : workspace open succeeds (mode=implement, implement_now)
     opening --> failed : workspace open fails
 
     analyzing --> awaiting_approval : analysis run succeeds (analyze_then_approve mode)
     analyzing --> implementing : analysis run succeeds (implement_now mode — skips approval)
-    analyzing --> done : analysis run succeeds (plan_only mode)
+    analyzing --> awaiting_revision : analysis run succeeds (request_clarification)
+    analyzing --> done : analysis run succeeds (plan_only or no_action_needed)
     analyzing --> failed : analysis run fails
 
     awaiting_approval --> implementing : POST /tasks/{id}/approve (approval gate)
     awaiting_approval --> awaiting_approval : POST /tasks/{id}/runs rejected (APPROVAL_REQUIRED)
 
-    implementing --> validating : implementation run succeeds
+    implementing --> validating : implementation run succeeds (run_validation)
+    implementing --> awaiting_revision : implementation run (request_review or needs_follow_up)
+    implementing --> done : validation skipped
     implementing --> failed : implementation run fails
 
     validating --> done : validation run passes
+    validating --> done : POST /tasks/{id}/close (Project Manager closes)
     validating --> awaiting_revision : validation run fails (issues found)
     validating --> failed : validation run errors
 
     awaiting_revision --> implementing : POST /tasks/{id}/revise (revision instructions submitted)
+    awaiting_revision --> done : POST /tasks/{id}/close (Project Manager closes)
     awaiting_revision --> failed : task abandoned (operator action)
 
+    failed --> done : POST /tasks/{id}/close (Project Manager closes)
+    failed --> opening : POST /tasks/{id}/runs retry
+    failed --> analyzing : POST /tasks/{id}/runs retry
+    failed --> implementing : POST /tasks/{id}/runs retry
+    failed --> validating : POST /tasks/{id}/runs retry
+
     done --> [*]
-    failed --> [*]
 ```
 
 ---
@@ -312,21 +331,28 @@ This table maps each of the 11 worker API endpoints to the state transitions the
 | `GET /tasks/{id}` | GET | None | Any | Returns current task state and last run summary |
 | `POST /tasks/{id}/approve` | POST | T6: `awaiting_approval → implementing` | `awaiting_approval` | The approval gate endpoint; only valid when task is in `awaiting_approval` |
 | `GET /projects/{id}/active-task` | GET | None | Any | Returns active (non-terminal) task for the project; used for resume lookup |
-| `POST /tasks/{id}/runs` | POST | T1: `created → opening`, T2: `opening → analyzing`, T8: `implementing → validating`; also triggers retry from `failed` | `created`, `failed` | Triggers a Kiro CLI run; mode parameter determines which phase |
+| `POST /tasks/{id}/runs` | POST | T1: `created → opening`; also triggers retry from `failed` | `created`, `failed` | Blocking — waits for run to complete before returning. Mode parameter determines which phase. |
+| `POST /tasks/{id}/runs/start` | POST | T1: `created → opening`; also triggers retry from `failed` | `created`, `failed` | **Non-blocking** — returns immediately with `task_id`, `run_id`, `status=running`. Use `GET /tasks/{id}` to poll progress. |
 | `GET /tasks/{id}/runs` | GET | None | Any | Lists all runs for a task; no state change |
 | `GET /runs/{id}` | GET | None | Any | Returns details of a specific run; no state change |
 | `GET /runs/{id}/artifact` | GET | None | Any | Returns the artifact for a completed run; no state change |
 | `POST /tasks/{id}/revise` | POST | T13: `awaiting_revision → implementing` | `awaiting_revision` | Submits revision instructions; immediately triggers new implementation run |
+| `POST /tasks/{id}/close` | POST | T15/T16/T17: `validating\|awaiting_revision\|failed → done` | `validating`, `awaiting_revision`, `failed` | Closes task directly to `done`; used when validation is not needed or not possible |
 
 **Automatic transitions** (not triggered by API calls — triggered by worker-internal events):
 
 | Transition | Trigger event |
 |---|---|
-| T2: `opening → analyzing` | Workspace open/clone/validate completes successfully |
+| T2: `opening → analyzing` | Workspace open/clone/validate completes successfully (mode=analyze) |
+| T2-variant: `opening → implementing` | Workspace open/clone/validate completes successfully (mode=implement, implement_now) |
 | T3: `opening → failed` | Workspace open/clone/validate fails |
-| T4: `analyzing → awaiting_approval` | Analysis Kiro run completes; artifact stored; operation is `analyze_then_approve` or `implement_and_prepare_pr` |
+| T4: `analyzing → done` | Analysis Kiro run completes; `recommended_next_step` is `approve_and_implement` with non-`implement_now` operation, or `no_action_needed` |
+| T4-variant: `analyzing → implementing` | Analysis Kiro run completes; operation is `implement_now` |
+| T4-variant: `analyzing → awaiting_revision` | Analysis Kiro run completes; `recommended_next_step` is `request_clarification` |
 | T5: `analyzing → failed` | Analysis Kiro run fails |
-| T8: `implementing → validating` | Implementation Kiro run completes; artifact stored |
+| T8: `implementing → validating` | Implementation Kiro run completes; `recommended_next_step` is `run_validation` |
+| T8-variant: `implementing → awaiting_revision` | Implementation Kiro run completes; `recommended_next_step` is `request_review` or `needs_follow_up` |
+| T8-variant: `implementing → done` | Implementation Kiro run completes; validation skipped |
 | T9: `implementing → failed` | Implementation Kiro run fails |
 | T10: `validating → done` | Validation Kiro run completes with pass status |
 | T11: `validating → awaiting_revision` | Validation Kiro run completes with fail status |
@@ -351,32 +377,44 @@ The worker must enforce these rules on every state transition attempt:
 
 ```
 created
-  └─► opening          [T1: POST /tasks/{id}/runs]
-        ├─► analyzing   [T2: workspace open succeeds — automatic]
+  └─► opening          [T1: POST /tasks/{id}/runs or /runs/start]
+        ├─► analyzing   [T2: workspace open succeeds, mode=analyze — automatic]
+        ├─► implementing [T2-variant: workspace open succeeds, mode=implement — automatic]
         └─► failed      [T3: workspace open fails — automatic]
 
 analyzing
   ├─► awaiting_approval [T4: analysis succeeds, analyze_then_approve mode — automatic]
   ├─► implementing      [T4-variant: analysis succeeds, implement_now mode — automatic]
-  ├─► done              [T4-variant: analysis succeeds, plan_only mode — automatic]
+  ├─► awaiting_revision [T4-variant: analysis succeeds, request_clarification — automatic]
+  ├─► done              [T4-variant: analysis succeeds, plan_only or no_action_needed — automatic]
   └─► failed            [T5: analysis fails — automatic]
 
 awaiting_approval
   └─► implementing      [T6: POST /tasks/{id}/approve — APPROVAL GATE]
 
 implementing
-  ├─► validating        [T8: implementation succeeds — automatic]
+  ├─► validating        [T8: implementation succeeds, run_validation — automatic]
+  ├─► awaiting_revision [T8-variant: request_review or needs_follow_up — automatic]
+  ├─► done              [T8-variant: validation skipped — automatic]
   └─► failed            [T9: implementation fails — automatic]
 
 validating
   ├─► done              [T10: validation passes — automatic]
+  ├─► done              [T15: POST /tasks/{id}/close — Project Manager closes]
   ├─► awaiting_revision [T11: validation fails with issues — automatic]
   └─► failed            [T12: validation errors — automatic]
 
 awaiting_revision
   ├─► implementing      [T13: POST /tasks/{id}/revise]
+  ├─► done              [T16: POST /tasks/{id}/close — Project Manager closes]
   └─► failed            [T14: operator abandon]
 
+failed
+  ├─► done              [T17: POST /tasks/{id}/close — Project Manager closes]
+  ├─► opening           [retry via POST /tasks/{id}/runs]
+  ├─► analyzing         [retry via POST /tasks/{id}/runs]
+  ├─► implementing      [retry via POST /tasks/{id}/runs]
+  └─► validating        [retry via POST /tasks/{id}/runs]
+
 done     [terminal]
-failed   [terminal — retry via POST /tasks/{id}/runs re-enters appropriate in-progress state]
 ```
