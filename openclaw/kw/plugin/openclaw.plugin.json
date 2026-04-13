@@ -12,7 +12,14 @@
       "kw_approve_implement",
       "kw_implement",
       "kw_complete_task",
-      "kw_cancel_task"
+      "kw_cancel_task",
+      "kw_list_active_tasks",
+      "kw_list_active_projects",
+      "kw_list_pending_decisions",
+      "kw_list_unfinished_tasks",
+      "kw_get_project_workspace",
+      "kw_list_project_continuity",
+      "kw_reinitialize_project_workspace"
     ]
   },
   "configSchema": {

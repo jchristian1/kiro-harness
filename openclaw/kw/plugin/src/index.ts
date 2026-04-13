@@ -8,6 +8,13 @@ import { makeHenryTaskStatusTool } from "./tools/henryTaskStatus.js";
 import { makeHenryImplementTool } from "./tools/henryImplement.js";
 import { makeKwCompleteTaskTool } from "./tools/kwCompleteTask.js";
 import { makeKwCancelTaskTool } from "./tools/kwCancelTask.js";
+import { makeKwListActiveTasksTool } from "./tools/kwListActiveTasks.js";
+import { makeKwListActiveProjectsTool } from "./tools/kwListActiveProjects.js";
+import { makeKwListPendingDecisionsTool } from "./tools/kwListPendingDecisions.js";
+import { makeKwListUnfinishedTasksTool } from "./tools/kwListUnfinishedTasks.js";
+import { makeKwGetProjectWorkspaceTool } from "./tools/kwGetProjectWorkspace.js";
+import { makeKwListProjectContinuityTool } from "./tools/kwListProjectContinuity.js";
+import { makeKwReinitializeProjectWorkspaceTool } from "./tools/kwReinitializeProjectWorkspace.js";
 
 const DEFAULT_WORKER_URL = "http://localhost:4000";
 
@@ -35,5 +42,12 @@ export default definePluginEntry({
     api.registerTool(makeHenryImplementTool(client));
     api.registerTool(makeKwCompleteTaskTool(client));
     api.registerTool(makeKwCancelTaskTool(client));
+    api.registerTool(makeKwListActiveTasksTool(client));
+    api.registerTool(makeKwListActiveProjectsTool(client));
+    api.registerTool(makeKwListPendingDecisionsTool(client));
+    api.registerTool(makeKwListUnfinishedTasksTool(client));
+    api.registerTool(makeKwGetProjectWorkspaceTool(client));
+    api.registerTool(makeKwListProjectContinuityTool(client));
+    api.registerTool(makeKwReinitializeProjectWorkspaceTool(client));
   },
 });
