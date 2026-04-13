@@ -5,8 +5,17 @@ import { parsePayload, isPayloadError, payloadErrorResponse } from "../parsePayl
 const OUTCOME_ICON: Record<string, string> = {
   already_healthy: "✓",
   rebound: "↺",
+  rebound_reused: "↺~",
   recreated: "✦",
   blocked: "✗",
+};
+
+const OUTCOME_LABEL: Record<string, string> = {
+  already_healthy: "already healthy",
+  rebound: "rebound (new record)",
+  rebound_reused: "rebound (existing record reused)",
+  recreated: "recreated",
+  blocked: "blocked",
 };
 
 export function makeKwReinitializeProjectWorkspaceTool(client: WorkerClient) {
@@ -17,7 +26,7 @@ export function makeKwReinitializeProjectWorkspaceTool(client: WorkerClient) {
       "For local_folder/local_repo: rebinds to the source path if it still exists. " +
       "For github_repo: re-clones into the managed workspace path. " +
       "For new_project: recreates the managed directory. " +
-      "Returns outcome (already_healthy | rebound | recreated | blocked) and workspace details.",
+      "Returns outcome (already_healthy | rebound | rebound_reused | recreated | blocked) and workspace details.",
     parameters: Type.Object({
       project_id: Type.String({ description: "The project ID to recover" }),
     }),
@@ -43,9 +52,10 @@ export function makeKwReinitializeProjectWorkspaceTool(client: WorkerClient) {
 
       const outcome = response["outcome"] as string;
       const icon = OUTCOME_ICON[outcome] ?? "?";
+      const label = OUTCOME_LABEL[outcome] ?? outcome;
 
       const lines: string[] = [
-        `${icon} ${outcome.replace("_", " ")} — ${response["project_name"]} (${response["project_id"]})`,
+        `${icon} ${label} — ${response["project_name"]} (${response["project_id"]})`,
         "",
         `source           : ${response["source"]}`,
         `outcome          : ${outcome}`,
@@ -61,6 +71,13 @@ export function makeKwReinitializeProjectWorkspaceTool(client: WorkerClient) {
         lines.push(`previous_ws_id   : ${response["previous_workspace_id"]}`);
       }
       lines.push(`reason           : ${response["reason"]}`);
+
+      // Shared-path warning — explicit cross-project reuse notice
+      if (response["shared_path_warning"]) {
+        lines.push("");
+        lines.push(`⚠ shared path    : ${response["shared_path_warning"]}`);
+      }
+
       lines.push("");
       lines.push(response["message"] as string);
 
@@ -68,8 +85,13 @@ export function makeKwReinitializeProjectWorkspaceTool(client: WorkerClient) {
         lines.push("");
         lines.push("Next steps:");
         lines.push("• For local_folder: ensure the source path exists on disk, then retry.");
+        lines.push("• If the path moved, run /kw_update_project_source_url first, then retry.");
         lines.push("• For github_repo: check network access and source_url, then retry.");
         lines.push("• Or create a new project pointing to the correct source.");
+      } else if (outcome === "rebound_reused" && response["shared_path_warning"]) {
+        lines.push("");
+        lines.push("⚠ Review: this workspace path is now shared between projects.");
+        lines.push("  If this is unintended, update one project's source_url to a different path.");
       } else if (outcome !== "already_healthy") {
         lines.push("");
         lines.push("Follow-up tasks can now reuse this workspace via /kw_implement or /kw_github_analyze.");

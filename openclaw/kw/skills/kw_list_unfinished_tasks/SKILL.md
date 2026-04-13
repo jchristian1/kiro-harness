@@ -1,4 +1,6 @@
 ---
+name: kw_list_unfinished_tasks
+description: List all tasks that were started but not completed and are not currently active. Shows failed, awaiting_revision, awaiting_approval, and stuck/orphaned opening tasks with resumability and recommended next action.
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool

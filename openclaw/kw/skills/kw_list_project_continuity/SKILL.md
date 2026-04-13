@@ -1,4 +1,6 @@
 ---
+name: kw_list_project_continuity
+description: Portfolio-level project continuity audit. Shows workspace health, unfinished task counts, active task counts, and recommended next action for every project.
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool

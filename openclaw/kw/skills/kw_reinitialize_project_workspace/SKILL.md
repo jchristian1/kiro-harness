@@ -1,4 +1,6 @@
 ---
+name: kw_reinitialize_project_workspace
+description: Recover a project's canonical workspace when it is missing or invalid. Rebinds local sources, reclones GitHub repos, or recreates managed new-project workspaces when possible.
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool

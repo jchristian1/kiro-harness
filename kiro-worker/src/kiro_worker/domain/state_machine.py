@@ -9,6 +9,8 @@ ALLOWED_TRANSITIONS: dict[tuple[TaskStatus, TaskStatus], bool] = {
     (TaskStatus.opening, TaskStatus.analyzing): True,
     # T2-variant: opening → implementing (implement_now — no analysis step)
     (TaskStatus.opening, TaskStatus.implementing): True,
+    # T2-variant: opening → validating (validate_task — direct validation start)
+    (TaskStatus.opening, TaskStatus.validating): True,
     # T3: opening → failed
     (TaskStatus.opening, TaskStatus.failed): True,
     # T4: analyzing → awaiting_approval (analyze_then_approve / implement_and_prepare_pr)

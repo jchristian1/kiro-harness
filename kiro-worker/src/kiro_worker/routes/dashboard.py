@@ -6,12 +6,12 @@ No state changes, no run triggers.
 import json
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from kiro_worker.db.engine import get_db
-from kiro_worker.db.models import Task, Project, Run, Artifact
+from kiro_worker.db.models import Task, Project, Run, Artifact, Meta
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -366,20 +366,95 @@ def _project_continuity_action(ws_status: str, unfinished_count: int, active_cou
 
 
 @router.get("/dashboard/project-continuity")
-def list_project_continuity(db: Session = Depends(get_db)):
+def list_project_continuity(
+    db: Session = Depends(get_db),
+    include_archived: bool = False,
+):
     """
     Portfolio-level project continuity audit.
     For each project: workspace health, unfinished task count, active task count,
-    latest activity, and a recommended PM action.
-    Sorted by urgency: invalid/missing first, then unfinished, then stale, then healthy.
-    """
-    projects = db.query(Project).order_by(Project.updated_at.desc()).all()
+    latest activity, shared-path warning, and a recommended PM action.
+    Sorted by urgency: invalid/missing first, then shared-path, then unfinished, then stale, then healthy.
 
-    URGENCY = {"invalid": 0, "missing": 1, "stale_unfinished": 2, "unfinished": 3, "stale": 4, "active": 5, "healthy": 6}
+    Archived projects are hidden by default. Pass include_archived=true to include them.
+    """
+    from kiro_worker.db.models import Workspace as WS
+    from kiro_worker.services.project_service import get_aliases
+    import json as _json
+
+    # Build set of archived project IDs from Meta table
+    archive_rows = db.query(Meta).filter(Meta.key.like("project_archive:%")).all()
+    archived_ids: set[str] = set()
+    for row in archive_rows:
+        try:
+            data = _json.loads(row.value)
+            if data.get("archived"):
+                pid = row.key.removeprefix("project_archive:")
+                archived_ids.add(pid)
+        except Exception:
+            pass
+
+    all_projects = db.query(Project).order_by(Project.updated_at.desc()).all()
+
+    # Filter archived projects unless explicitly requested
+    if include_archived:
+        projects = all_projects
+    else:
+        projects = [p for p in all_projects if p.id not in archived_ids]
+
+    # Build shared-path map: workspace_id → [project_id, ...]
+    # A workspace is "shared" when multiple projects pin the same workspace_id,
+    # OR when a workspace's project_id differs from the project that currently pins it.
+    # Strategy: for each valid workspace, find all projects that pin it via workspace_id.
+    all_workspaces = db.query(WS).all()
+    ws_id_to_projects: dict[str, list[str]] = {}
+    for p in projects:
+        if p.workspace_id:
+            ws_id_to_projects.setdefault(p.workspace_id, [])
+            if p.id not in ws_id_to_projects[p.workspace_id]:
+                ws_id_to_projects[p.workspace_id].append(p.id)
+
+    # Also detect path-level sharing: workspace records whose path is valid and whose
+    # project_id differs from the project currently pinning them.
+    # Since the DB has a UNIQUE constraint on path, each path has at most one workspace record.
+    # Shared-path means: project A pins workspace W, but W.project_id = project B.
+    ws_map: dict[str, WS] = {ws.id: ws for ws in all_workspaces}
+
+    # Build project_id → project_name lookup for warning messages
+    project_name_map = {p.id: p.name for p in projects}
+
+    URGENCY = {"invalid": 0, "missing": 1, "shared_path": 2, "stale_unfinished": 3, "unfinished": 4, "stale": 5, "active": 6, "healthy": 7}
 
     items = []
     for project in projects:
         ws_status, ws_id, ws_path = _workspace_health(project, db)
+
+        # Shared-path detection
+        # Case 1: multiple projects pin the same workspace_id
+        # Case 2: the project's canonical workspace record has a different project_id
+        shared_path_warning = None
+        shared_with: list[str] = []
+
+        if ws_id and ws_id in ws_id_to_projects:
+            pinning_projects = [pid for pid in ws_id_to_projects[ws_id] if pid != project.id]
+            if pinning_projects:
+                shared_with = pinning_projects
+
+        # Also check if the workspace record's project_id differs from this project
+        if ws_id and not shared_with:
+            ws_record = ws_map.get(ws_id)
+            if ws_record and ws_record.project_id != project.id:
+                shared_with = [ws_record.project_id]
+
+        if shared_with:
+            other_names = [
+                f"{project_name_map.get(pid, pid)} ({pid})" for pid in shared_with
+            ]
+            shared_path_warning = (
+                f"Workspace path is shared with: {', '.join(other_names)}. "
+                "Review whether this is intended. "
+                "Use /kw_update_project_source_url to assign a unique path if needed."
+            )
 
         # Count unfinished tasks
         unfinished_tasks = (
@@ -411,10 +486,14 @@ def list_project_continuity(db: Session = Depends(get_db)):
         )
 
         recommended_action = _project_continuity_action(ws_status, unfinished_count, active_count)
+        if shared_path_warning and ws_status == "healthy" and unfinished_count == 0 and active_count == 0:
+            recommended_action = "Review shared workspace path — use /kw_update_project_source_url to assign a unique path if needed"
 
         # Compute urgency bucket for sorting
         if ws_status in ("invalid", "missing"):
             urgency_key = ws_status
+        elif shared_with and ws_status == "healthy" and unfinished_count == 0:
+            urgency_key = "shared_path"
         elif active_count > 0:
             urgency_key = "active"
         elif unfinished_count > 0 and ws_status == "stale":
@@ -429,10 +508,14 @@ def list_project_continuity(db: Session = Depends(get_db)):
         items.append({
             "project_id": project.id,
             "project_name": project.name,
+            "aliases": get_aliases(db, project.id),
             "source": project.source,
+            "archived": project.id in archived_ids,
             "workspace_id": ws_id,
             "workspace_path": ws_path,
             "workspace_status": ws_status,
+            "shared_path_warning": shared_path_warning,
+            "shared_with_project_ids": shared_with if shared_with else None,
             "unfinished_task_count": unfinished_count,
             "active_task_count": active_count,
             "most_recent_unfinished_task_id": most_recent_unfinished_id,
@@ -448,13 +531,17 @@ def list_project_continuity(db: Session = Depends(get_db)):
         del item["_urgency"]
 
     # Summary counts
+    shared_path_count = sum(1 for i in items if i["shared_path_warning"])
     summary = {
-        "healthy": sum(1 for i in items if i["workspace_status"] == "healthy" and i["unfinished_task_count"] == 0 and i["active_task_count"] == 0),
+        "healthy": sum(1 for i in items if i["workspace_status"] == "healthy" and i["unfinished_task_count"] == 0 and i["active_task_count"] == 0 and not i["shared_path_warning"]),
         "active": sum(1 for i in items if i["active_task_count"] > 0),
         "unfinished": sum(1 for i in items if i["unfinished_task_count"] > 0 and i["active_task_count"] == 0),
         "stale": sum(1 for i in items if i["workspace_status"] == "stale" and i["unfinished_task_count"] == 0),
         "invalid": sum(1 for i in items if i["workspace_status"] == "invalid"),
         "missing": sum(1 for i in items if i["workspace_status"] == "missing"),
+        "shared_path": shared_path_count,
+        "archived_shown": sum(1 for i in items if i.get("archived")),
+        "archived_hidden": len(archived_ids) - sum(1 for i in items if i.get("archived")),
     }
 
-    return {"projects": items, "count": len(items), "summary": summary}
+    return {"projects": items, "count": len(items), "summary": summary, "include_archived": include_archived}

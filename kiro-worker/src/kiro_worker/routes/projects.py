@@ -1,10 +1,10 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from kiro_worker.db.engine import get_db
-from kiro_worker.schemas.project import ProjectCreate, ProjectResponse
+from kiro_worker.schemas.project import ProjectCreate, ProjectResponse, SourceUrlUpdate, AliasSet, AliasRemove
 from kiro_worker.schemas.workspace import WorkspaceCreate, WorkspaceResponse
 from kiro_worker.schemas.task import TaskResponse
 from kiro_worker.schemas.run import RunSummary
@@ -48,6 +48,21 @@ def _task_to_response(task, db: Session) -> TaskResponse:
     )
 
 
+def _project_response(project, db: Session) -> ProjectResponse:
+    aliases = project_service.get_aliases(db, project.id)
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        source=project.source,
+        source_url=project.source_url,
+        workspace_id=project.workspace_id,
+        owner_id=project.owner_id,
+        aliases=aliases,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
+
+
 @router.post("/projects", status_code=201)
 def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> ProjectResponse:
     # Validate source_url requirement
@@ -76,16 +91,7 @@ def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> Projec
             409,
         )
 
-    return ProjectResponse(
-        id=project.id,
-        name=project.name,
-        source=project.source,
-        source_url=project.source_url,
-        workspace_id=project.workspace_id,
-        owner_id=project.owner_id,
-        created_at=project.created_at,
-        updated_at=project.updated_at,
-    )
+    return _project_response(project, db)
 
 
 @router.post("/projects/{project_id}/workspaces", status_code=201)
@@ -147,6 +153,73 @@ async def get_project_workspace(project_id: str, db: Session = Depends(get_db)) 
     )
 
 
+@router.post("/projects/{project_id}/source-url")
+def update_project_source_url(
+    project_id: str,
+    body: SourceUrlUpdate,
+    db: Session = Depends(get_db),
+):
+    """
+    Update a project's source_url in place.
+    Preserves project identity and task history.
+    Allowed for: local_folder, local_repo, github_repo.
+    Not allowed for: new_project (managed path is derived from project name, not source_url).
+    After updating, call POST /projects/{id}/workspace/reinitialize to repair workspace continuity.
+    """
+    project = project_service.get_project(db, project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    source = Source(project.source)
+
+    # new_project does not use source_url — managed path is derived from project name
+    if source == Source.new_project:
+        _error(
+            "SOURCE_UPDATE_NOT_SUPPORTED",
+            "new_project workspaces are managed by the worker and do not use source_url. "
+            "Use POST /projects/{id}/workspace/reinitialize to recreate the managed workspace.",
+            {"source": project.source},
+            400,
+        )
+
+    if not body.source_url or not body.source_url.strip():
+        _error("VALIDATION_ERROR", "source_url cannot be empty.")
+
+    old_source_url = project.source_url
+    new_source_url = body.source_url.strip()
+
+    # Validate existence for local sources
+    path_exists: bool | None = None
+    if source in (Source.local_folder, Source.local_repo):
+        import os
+        path_exists = os.path.exists(new_source_url)
+
+    project = project_service.update_source_url(db, project, new_source_url)
+
+    # Determine recommended next step
+    if source in (Source.local_folder, Source.local_repo):
+        if path_exists:
+            next_step = "retry_recovery"
+            next_step_message = "Path exists — run POST /projects/{id}/workspace/reinitialize to rebind the workspace."
+        else:
+            next_step = "path_not_found"
+            next_step_message = f"Warning: path '{new_source_url}' does not exist on disk yet. Ensure it exists before running workspace recovery."
+    else:
+        next_step = "retry_recovery"
+        next_step_message = "Run POST /projects/{id}/workspace/reinitialize to re-clone and rebind the workspace."
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "source": project.source,
+        "old_source_url": old_source_url,
+        "new_source_url": project.source_url,
+        "path_exists": path_exists,
+        "next_step": next_step,
+        "message": next_step_message,
+    }
+
+
 @router.post("/projects/{project_id}/workspace/reinitialize")
 async def reinitialize_project_workspace(
     project_id: str,
@@ -176,6 +249,78 @@ async def reinitialize_project_workspace(
         "project_name": project.name,
         "source": project.source,
         **result,
+    }
+
+
+@router.post("/projects/{project_id}/aliases", status_code=200)
+def set_project_alias(project_id: str, body: AliasSet, db: Session = Depends(get_db)):
+    """
+    Add a friendly alias to a project.
+    Aliases are case-insensitive and globally unique.
+    Returns the updated alias list, or a conflict error if the alias is taken by another project.
+    """
+    project = project_service.get_project(db, project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    try:
+        updated_aliases, conflict_pid = project_service.set_alias(db, project_id, body.alias)
+    except ValueError as e:
+        _error("VALIDATION_ERROR", str(e))
+
+    if conflict_pid:
+        conflict = project_service.get_project(db, conflict_pid)
+        _error(
+            "ALIAS_CONFLICT",
+            f"Alias '{body.alias.strip().lower()}' is already assigned to project '{conflict.name if conflict else conflict_pid}'.",
+            {"conflict_project_id": conflict_pid, "conflict_project_name": conflict.name if conflict else None},
+            409,
+        )
+
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "aliases": updated_aliases,
+        "message": f"Alias '{body.alias.strip().lower()}' added.",
+    }
+
+
+@router.delete("/projects/{project_id}/aliases")
+def remove_project_alias(project_id: str, body: AliasRemove, db: Session = Depends(get_db)):
+    """Remove an alias from a project. No-op if alias does not exist."""
+    project = project_service.get_project(db, project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    updated_aliases = project_service.remove_alias(db, project_id, body.alias)
+    return {
+        "project_id": project_id,
+        "project_name": project.name,
+        "aliases": updated_aliases,
+        "message": f"Alias '{body.alias.strip().lower()}' removed.",
+    }
+
+
+@router.get("/projects/resolve")
+def resolve_project(query: str = Query(..., description="Project id, canonical name, or alias"), db: Session = Depends(get_db)):
+    """
+    Resolve a project by id, canonical name, or alias.
+    Returns the project with match_type indicating how it was found.
+    """
+    project, match_type = project_service.resolve_project(db, query)
+    if not project:
+        _error("NOT_FOUND", f"No project found matching '{query}'.", {"query": query}, 404)
+
+    aliases = project_service.get_aliases(db, project.id)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "source": project.source,
+        "source_url": project.source_url,
+        "workspace_id": project.workspace_id,
+        "aliases": aliases,
+        "match_type": match_type,
+        "query": query,
     }
 
 

@@ -1,4 +1,6 @@
 ---
+name: kw_get_project_workspace
+description: Get the canonical workspace for a project. Shows which workspace path is active, when it was last used, and whether continuity is preserved for follow-up work.
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool

@@ -15,6 +15,13 @@ import { makeKwListUnfinishedTasksTool } from "./tools/kwListUnfinishedTasks.js"
 import { makeKwGetProjectWorkspaceTool } from "./tools/kwGetProjectWorkspace.js";
 import { makeKwListProjectContinuityTool } from "./tools/kwListProjectContinuity.js";
 import { makeKwReinitializeProjectWorkspaceTool } from "./tools/kwReinitializeProjectWorkspace.js";
+import { makeKwUpdateProjectSourceUrlTool } from "./tools/kwUpdateProjectSourceUrl.js";
+import { makeKwSetProjectAliasTool } from "./tools/kwSetProjectAlias.js";
+import { makeKwResolveProjectTool } from "./tools/kwResolveProject.js";
+import { makeKwRetryTaskTool } from "./tools/kwRetryTask.js";
+import { makeKwResumeProjectTool } from "./tools/kwResumeProject.js";
+import { makeKwValidateTaskTool } from "./tools/kwValidateTask.js";
+import { makeKwBulkCleanupTool } from "./tools/kwBulkCleanup.js";
 
 const DEFAULT_WORKER_URL = "http://localhost:4000";
 
@@ -49,5 +56,12 @@ export default definePluginEntry({
     api.registerTool(makeKwGetProjectWorkspaceTool(client));
     api.registerTool(makeKwListProjectContinuityTool(client));
     api.registerTool(makeKwReinitializeProjectWorkspaceTool(client));
+    api.registerTool(makeKwUpdateProjectSourceUrlTool(client));
+    api.registerTool(makeKwSetProjectAliasTool(client));
+    api.registerTool(makeKwResolveProjectTool(client));
+    api.registerTool(makeKwRetryTaskTool(client));
+    api.registerTool(makeKwResumeProjectTool(client));
+    api.registerTool(makeKwValidateTaskTool(client));
+    api.registerTool(makeKwBulkCleanupTool(client));
   },
 });

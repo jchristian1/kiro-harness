@@ -19,7 +19,14 @@
       "kw_list_unfinished_tasks",
       "kw_get_project_workspace",
       "kw_list_project_continuity",
-      "kw_reinitialize_project_workspace"
+      "kw_reinitialize_project_workspace",
+      "kw_update_project_source_url",
+      "kw_set_project_alias",
+      "kw_resolve_project",
+      "kw_retry_task",
+      "kw_resume_project",
+      "kw_validate_task",
+      "kw_bulk_cleanup"
     ]
   },
   "configSchema": {

@@ -9,8 +9,9 @@ from kiro_worker.db.engine import get_db
 from kiro_worker.schemas.task import TaskCreate, TaskResponse, ReviseRequest
 from kiro_worker.schemas.run import RunCreate, RunSummary, RunCreateResponse, RunListResponse, RunListItem
 from kiro_worker.services import project_service, workspace_service, task_service, run_service
+from kiro_worker.db.models import Task
 from kiro_worker.adapters.kiro_adapter import invoke_kiro
-from kiro_worker.domain.enums import TaskStatus, RunMode, Operation
+from kiro_worker.domain.enums import TaskStatus, RunMode, Operation, Intent, Source
 from kiro_worker.config import settings
 
 logger = logging.getLogger(__name__)
@@ -547,6 +548,363 @@ def close_task(task_id: str, db: Session = Depends(get_db)) -> TaskResponse:
 
     task = task_service.transition_task(db, task, TaskStatus.done)
     return _task_to_response(task, db)
+
+
+@router.post("/tasks/{task_id}/validate", status_code=202)
+async def validate_task(task_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Start a validation run for a completed or awaiting-revision implementation task.
+    Non-blocking — returns immediately with new task_id, run_id, and status=running.
+
+    Creates a new task on the same project with the same parameters and starts a validate run.
+    Allowed source task states: done, awaiting_revision, validating (re-validate).
+    """
+    prior_task = task_service.get_task(db, task_id)
+    if not prior_task:
+        _error("NOT_FOUND", "Task not found.", {}, 404)
+
+    current = TaskStatus(prior_task.status)
+    validatable = {TaskStatus.done, TaskStatus.awaiting_revision, TaskStatus.validating}
+    if current not in validatable:
+        _error(
+            "NOT_VALIDATABLE",
+            f"Task cannot be validated from state '{prior_task.status}'. "
+            "Validatable states: done, awaiting_revision, validating.",
+            {"current_status": prior_task.status},
+            409,
+        )
+
+    project = project_service.get_project(db, prior_task.project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    try:
+        workspace, _ = await workspace_service.resolve_or_create_workspace(
+            db, project, settings.WORKSPACE_SAFE_ROOT
+        )
+    except RuntimeError as e:
+        _error("WORKSPACE_ERROR", str(e), {}, 500)
+
+    # Build description that carries forward implementation context
+    prior_run = run_service.get_last_run(db, task_id)
+    description = prior_task.description
+
+    new_task = task_service.create_task(
+        db,
+        project_id=prior_task.project_id,
+        workspace_id=workspace.id,
+        intent=Intent(prior_task.intent),
+        source=Source(prior_task.source),
+        operation=Operation(prior_task.operation),
+        description=description,
+    )
+
+    # Transition: created → opening → validating
+    new_task = task_service.transition_task(db, new_task, TaskStatus.opening)
+    new_task = task_service.transition_task(db, new_task, TaskStatus.validating)
+
+    skill = SKILL_MAP[RunMode.validate]
+    context = task_service.build_resume_context(db, new_task, workspace.path)
+    run = run_service.create_run(
+        db,
+        task_id=new_task.id,
+        mode=RunMode.validate.value,
+        agent=settings.KIRO_DEFAULT_AGENT,
+        skill=skill,
+        context_snapshot=context,
+    )
+
+    async def _run_in_background():
+        from kiro_worker.db.engine import SessionLocal
+        bg_db = SessionLocal()
+        try:
+            bg_run = run_service.get_run(bg_db, run.id)
+            bg_task = task_service.get_task(bg_db, new_task.id)
+            bg_workspace = workspace_service.get_workspace(bg_db, bg_task.workspace_id)
+            bg_context = task_service.build_resume_context(bg_db, bg_task, bg_workspace.path)
+            await _execute_run_from_existing(bg_db, bg_task, bg_run, RunMode.validate, bg_workspace.path, bg_context)
+        except Exception as e:
+            logger.exception(f"Validate background run failed for run {run.id}: {e}")
+        finally:
+            bg_db.close()
+
+    background_tasks.add_task(_run_in_background)
+
+    return {
+        "new_task_id": new_task.id,
+        "run_id": run.id,
+        "prior_task_id": task_id,
+        "prior_task_status": prior_task.status,
+        "mode": "validate",
+        "task_status": new_task.status,
+        "run_status": "running",
+        "workspace_id": workspace.id,
+        "workspace_path": workspace.path,
+        "message": "Validation started. Use kw_task_status to check progress.",
+    }
+
+
+@router.post("/tasks/{task_id}/retry", status_code=202)
+async def retry_task(task_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Retry a failed, cancelled, or unfinished task by creating a fresh task with the same
+    parameters and immediately starting a non-blocking run.
+
+    Clones: project_id, workspace, intent, source, operation, description.
+    Run mode: same as the prior task's last run, or 'analyze' if no prior run exists.
+
+    Allowed source task states: failed, awaiting_revision, awaiting_approval.
+    Returns immediately with new task_id, run_id, and status=running.
+    """
+    prior_task = task_service.get_task(db, task_id)
+    if not prior_task:
+        _error("NOT_FOUND", "Task not found.", {}, 404)
+
+    current = TaskStatus(prior_task.status)
+    retryable = {TaskStatus.failed, TaskStatus.awaiting_revision, TaskStatus.awaiting_approval}
+    if current not in retryable:
+        _error(
+            "NOT_RETRYABLE",
+            f"Task cannot be retried from state '{prior_task.status}'. "
+            "Retryable states: failed, awaiting_revision, awaiting_approval.",
+            {"current_status": prior_task.status},
+            409,
+        )
+
+    # Determine run mode from prior task's last run
+    prior_run = run_service.get_last_run(db, task_id)
+    if prior_run and prior_run.mode in ("analyze", "implement", "validate"):
+        mode = RunMode(prior_run.mode)
+    else:
+        mode = RunMode.analyze  # safe default
+
+    # Resolve workspace — reuse canonical workspace for the project
+    project = project_service.get_project(db, prior_task.project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    try:
+        workspace, _ = await workspace_service.resolve_or_create_workspace(
+            db, project, settings.WORKSPACE_SAFE_ROOT
+        )
+    except RuntimeError as e:
+        _error("WORKSPACE_ERROR", str(e), {}, 500)
+
+    # Create the new task with the same parameters
+    new_task = task_service.create_task(
+        db,
+        project_id=prior_task.project_id,
+        workspace_id=workspace.id,
+        intent=Intent(prior_task.intent),
+        source=Source(prior_task.source),
+        operation=Operation(prior_task.operation),
+        description=prior_task.description,
+    )
+
+    # Transition to in-progress state synchronously
+    new_task = task_service.transition_task(db, new_task, TaskStatus.opening)
+    if mode == RunMode.implement:
+        new_task = task_service.transition_task(db, new_task, TaskStatus.implementing)
+    elif mode == RunMode.validate:
+        new_task = task_service.transition_task(db, new_task, TaskStatus.validating)
+    else:
+        new_task = task_service.transition_task(db, new_task, TaskStatus.analyzing)
+
+    # Create run record synchronously so we can return run_id immediately
+    skill = SKILL_MAP[mode]
+    context = task_service.build_resume_context(db, new_task, workspace.path)
+    run = run_service.create_run(
+        db,
+        task_id=new_task.id,
+        mode=mode.value,
+        agent=settings.KIRO_DEFAULT_AGENT,
+        skill=skill,
+        context_snapshot=context,
+    )
+
+    async def _run_in_background():
+        from kiro_worker.db.engine import SessionLocal
+        bg_db = SessionLocal()
+        try:
+            bg_run = run_service.get_run(bg_db, run.id)
+            bg_task = task_service.get_task(bg_db, new_task.id)
+            bg_workspace = workspace_service.get_workspace(bg_db, bg_task.workspace_id)
+            bg_context = task_service.build_resume_context(bg_db, bg_task, bg_workspace.path)
+            await _execute_run_from_existing(bg_db, bg_task, bg_run, mode, bg_workspace.path, bg_context)
+        except Exception as e:
+            logger.exception(f"Retry background run failed for run {run.id}: {e}")
+        finally:
+            bg_db.close()
+
+    background_tasks.add_task(_run_in_background)
+
+    mode_labels = {RunMode.analyze: "Analysis", RunMode.implement: "Implementation", RunMode.validate: "Validation"}
+    return {
+        "new_task_id": new_task.id,
+        "run_id": run.id,
+        "prior_task_id": task_id,
+        "prior_task_status": prior_task.status,
+        "mode": mode.value,
+        "task_status": new_task.status,
+        "run_status": "running",
+        "workspace_id": workspace.id,
+        "workspace_path": workspace.path,
+        "retry_type": "fresh_task",
+        "message": f"{mode_labels.get(mode, 'Run')} retry started as new task. Use kw_task_status to check progress.",
+    }
+
+
+@router.post("/projects/{project_id}/resume", status_code=202)
+async def resume_project(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Resume the most recent unfinished task for a project.
+
+    Finds the latest task in: failed, awaiting_revision, awaiting_approval, opening.
+    - failed / awaiting_revision (cancelled run): creates a fresh retry task and starts non-blocking run.
+    - awaiting_revision (non-cancelled): returns needs_decision — PM must provide revision instructions.
+    - awaiting_approval: returns needs_decision — PM must approve via /tasks/{id}/approve.
+    - opening (orphaned): returns blocked — task never started, recommend close.
+    """
+    project = project_service.get_project(db, project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    UNFINISHED = {"failed", "awaiting_revision", "awaiting_approval", "opening"}
+    latest_task = (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.status.in_(UNFINISHED),
+        )
+        .order_by(Task.updated_at.desc())
+        .first()
+    )
+
+    if not latest_task:
+        return {
+            "project_id": project_id,
+            "outcome": "nothing_to_resume",
+            "message": "No unfinished tasks found for this project.",
+            "task_id": None,
+        }
+
+    current = TaskStatus(latest_task.status)
+    last_run = run_service.get_last_run(db, latest_task.id)
+
+    # awaiting_approval — PM must approve, cannot auto-resume
+    if current == TaskStatus.awaiting_approval:
+        return {
+            "project_id": project_id,
+            "outcome": "needs_decision",
+            "decision_type": "approval_required",
+            "task_id": latest_task.id,
+            "task_status": latest_task.status,
+            "message": f"Task {latest_task.id} is awaiting approval. Use /kw_approve_implement to approve.",
+        }
+
+    # awaiting_revision with non-cancelled run — PM must provide instructions
+    if current == TaskStatus.awaiting_revision and (not last_run or last_run.status != "cancelled"):
+        return {
+            "project_id": project_id,
+            "outcome": "needs_decision",
+            "decision_type": "revision_instructions_required",
+            "task_id": latest_task.id,
+            "task_status": latest_task.status,
+            "last_run_status": last_run.status if last_run else None,
+            "message": f"Task {latest_task.id} needs revision instructions. Use /kw_implement with revised description.",
+        }
+
+    # opening (orphaned) — recommend close
+    if current == TaskStatus.opening:
+        return {
+            "project_id": project_id,
+            "outcome": "blocked",
+            "block_reason": "orphaned_task",
+            "task_id": latest_task.id,
+            "task_status": latest_task.status,
+            "message": f"Task {latest_task.id} is stuck in opening state (never started a run). Use /kw_complete_task to close it.",
+        }
+
+    # failed or awaiting_revision with cancelled run — auto-retry
+    try:
+        workspace, _ = await workspace_service.resolve_or_create_workspace(
+            db, project, settings.WORKSPACE_SAFE_ROOT
+        )
+    except RuntimeError as e:
+        return {
+            "project_id": project_id,
+            "outcome": "blocked",
+            "block_reason": "workspace_unavailable",
+            "task_id": latest_task.id,
+            "message": f"Cannot resume: workspace unavailable — {e}. Run /kw_reinitialize_project_workspace first.",
+        }
+
+    # Determine mode from prior run
+    if last_run and last_run.mode in ("analyze", "implement", "validate"):
+        mode = RunMode(last_run.mode)
+    else:
+        mode = RunMode.analyze
+
+    new_task = task_service.create_task(
+        db,
+        project_id=latest_task.project_id,
+        workspace_id=workspace.id,
+        intent=Intent(latest_task.intent),
+        source=Source(latest_task.source),
+        operation=Operation(latest_task.operation),
+        description=latest_task.description,
+    )
+
+    new_task = task_service.transition_task(db, new_task, TaskStatus.opening)
+    if mode == RunMode.implement:
+        new_task = task_service.transition_task(db, new_task, TaskStatus.implementing)
+    elif mode == RunMode.validate:
+        new_task = task_service.transition_task(db, new_task, TaskStatus.validating)
+    else:
+        new_task = task_service.transition_task(db, new_task, TaskStatus.analyzing)
+
+    skill = SKILL_MAP[mode]
+    context = task_service.build_resume_context(db, new_task, workspace.path)
+    run = run_service.create_run(
+        db,
+        task_id=new_task.id,
+        mode=mode.value,
+        agent=settings.KIRO_DEFAULT_AGENT,
+        skill=skill,
+        context_snapshot=context,
+    )
+
+    async def _run_in_background():
+        from kiro_worker.db.engine import SessionLocal
+        bg_db = SessionLocal()
+        try:
+            bg_run = run_service.get_run(bg_db, run.id)
+            bg_task = task_service.get_task(bg_db, new_task.id)
+            bg_workspace = workspace_service.get_workspace(bg_db, bg_task.workspace_id)
+            bg_context = task_service.build_resume_context(bg_db, bg_task, bg_workspace.path)
+            await _execute_run_from_existing(bg_db, bg_task, bg_run, mode, bg_workspace.path, bg_context)
+        except Exception as e:
+            logger.exception(f"Resume background run failed for run {run.id}: {e}")
+        finally:
+            bg_db.close()
+
+    background_tasks.add_task(_run_in_background)
+
+    return {
+        "project_id": project_id,
+        "outcome": "retried",
+        "new_task_id": new_task.id,
+        "run_id": run.id,
+        "prior_task_id": latest_task.id,
+        "prior_task_status": latest_task.status,
+        "mode": mode.value,
+        "task_status": new_task.status,
+        "run_status": "running",
+        "workspace_id": workspace.id,
+        "workspace_path": workspace.path,
+        "retry_type": "fresh_task",
+        "message": f"Resumed project by retrying task {latest_task.id} as new task {new_task.id}. Use kw_task_status to check progress.",
+    }
 
 
 @router.get("/tasks/{task_id}/runs")
