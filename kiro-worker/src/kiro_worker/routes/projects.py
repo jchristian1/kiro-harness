@@ -98,11 +98,8 @@ async def open_workspace(
     if not project:
         _error("NOT_FOUND", "Project not found.", {}, 404)
 
-    if project.workspace_id:
-        _error("WORKSPACE_ALREADY_EXISTS", "Project already has an active workspace.", {}, 409)
-
     try:
-        workspace = await workspace_service.open_workspace(
+        workspace, reuse_decision = await workspace_service.resolve_or_create_workspace(
             db, project, settings.WORKSPACE_SAFE_ROOT, body.git_branch
         )
     except RuntimeError as e:
@@ -110,8 +107,6 @@ async def open_workspace(
     except Exception as e:
         logger.exception("Failed to open workspace")
         _error("INTERNAL_ERROR", f"Failed to open workspace: {e}", {}, 500)
-
-    project_service.set_workspace(db, project, workspace.id)
 
     return WorkspaceResponse(
         id=workspace.id,
@@ -121,7 +116,67 @@ async def open_workspace(
         git_branch=workspace.git_branch,
         created_at=workspace.created_at,
         last_accessed_at=workspace.last_accessed_at,
+        reuse_decision=reuse_decision,
     )
+
+
+@router.get("/projects/{project_id}/workspace")
+async def get_project_workspace(project_id: str, db: Session = Depends(get_db)) -> WorkspaceResponse:
+    """
+    Return the canonical workspace for a project.
+    Resolves the best available workspace without creating a new one.
+    Use this for PM visibility into which workspace continuity is active.
+    """
+    project = project_service.get_project(db, project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    workspace = workspace_service.get_canonical_workspace(db, project)
+    if not workspace:
+        _error("NOT_FOUND", "No valid workspace found for this project.", {}, 404)
+
+    return WorkspaceResponse(
+        id=workspace.id,
+        project_id=workspace.project_id,
+        path=workspace.path,
+        git_remote=workspace.git_remote,
+        git_branch=workspace.git_branch,
+        created_at=workspace.created_at,
+        last_accessed_at=workspace.last_accessed_at,
+        reuse_decision="existing",
+    )
+
+
+@router.post("/projects/{project_id}/workspace/reinitialize")
+async def reinitialize_project_workspace(
+    project_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Recover a project's canonical workspace when it is missing or invalid.
+    - local_folder/local_repo: rebinds to source_url if path still exists; blocked if gone.
+    - github_repo: re-clones into managed workspace path if needed.
+    - new_project: recreates the managed directory under safe_root.
+    Returns a structured recovery result with outcome, workspace details, and PM message.
+    """
+    project = project_service.get_project(db, project_id)
+    if not project:
+        _error("NOT_FOUND", "Project not found.", {}, 404)
+
+    try:
+        result = await workspace_service.reinitialize_workspace(
+            db, project, settings.WORKSPACE_SAFE_ROOT
+        )
+    except Exception as e:
+        logger.exception("Workspace reinitialize failed")
+        _error("INTERNAL_ERROR", f"Recovery failed: {e}", {}, 500)
+
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        "source": project.source,
+        **result,
+    }
 
 
 @router.get("/projects/{project_id}/active-task")

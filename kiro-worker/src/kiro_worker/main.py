@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from kiro_worker.logging_config import configure_logging
 from kiro_worker.config import settings
 from kiro_worker.db.engine import create_tables
-from kiro_worker.routes import health, projects, tasks, runs
+from kiro_worker.routes import health, projects, tasks, runs, dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(projects.router)
     app.include_router(tasks.router)
     app.include_router(runs.router)
+    app.include_router(dashboard.router)
 
     return app
 

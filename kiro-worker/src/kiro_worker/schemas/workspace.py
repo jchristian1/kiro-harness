@@ -14,3 +14,4 @@ class WorkspaceResponse(BaseModel):
     git_branch: Optional[str]
     created_at: str
     last_accessed_at: str
+    reuse_decision: Optional[str] = None  # "reused" | "created" | "existing"

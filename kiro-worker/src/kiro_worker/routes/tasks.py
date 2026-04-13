@@ -198,16 +198,18 @@ async def _execute_run(
 
 
 @router.post("/tasks", status_code=201)
-def create_task(body: TaskCreate, db: Session = Depends(get_db)) -> TaskResponse:
+async def create_task(body: TaskCreate, db: Session = Depends(get_db)):
     project = project_service.get_project(db, body.project_id)
     if not project:
         _error("NOT_FOUND", "Project not found.", {}, 404)
-    if not project.workspace_id:
-        _error("NOT_FOUND", "Project has no active workspace.", {}, 404)
 
-    workspace = workspace_service.get_workspace(db, project.workspace_id)
-    if not workspace:
-        _error("NOT_FOUND", "Workspace not found.", {}, 404)
+    # Resolve or create workspace — reuses existing if valid, creates only if needed
+    try:
+        workspace, reuse_decision = await workspace_service.resolve_or_create_workspace(
+            db, project, settings.WORKSPACE_SAFE_ROOT
+        )
+    except RuntimeError as e:
+        _error("INTERNAL_ERROR", str(e), {}, 500)
 
     task = task_service.create_task(
         db,
@@ -218,7 +220,12 @@ def create_task(body: TaskCreate, db: Session = Depends(get_db)) -> TaskResponse
         operation=body.operation,
         description=body.description,
     )
-    return _task_to_response(task, db)
+    response = _task_to_response(task, db)
+    # Attach workspace continuity info for PM visibility
+    response_dict = response.model_dump()
+    response_dict["workspace_reuse"] = reuse_decision
+    response_dict["workspace_path"] = workspace.path
+    return response_dict
 
 
 @router.get("/tasks/{task_id}")
